@@ -1,0 +1,6 @@
+telethon>=1.35.0
+MetaTrader5>=5.0.5430
+PyYAML>=6.0.1
+python-dotenv>=1.0.0
+backoff>=2.2.1
+
