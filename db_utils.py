@@ -32,6 +32,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     channel_id INTEGER NOT NULL,
+                    telegram_msg_id INTEGER,
                     timestamp TEXT NOT NULL,
                     raw_message TEXT NOT NULL
                 )
@@ -81,6 +82,10 @@ class Database:
                 ON messages(timestamp DESC)
             ''')
             conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_messages_telegram_msg_id 
+                ON messages(telegram_msg_id)
+            ''')
+            conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_signals_timestamp 
                 ON signals(timestamp DESC)
             ''')
@@ -107,13 +112,13 @@ class Database:
     
     # === MESSAGE OPERATIONS ===
     
-    def store_message(self, channel_id: int, message_text: str) -> int:
-        """Store raw message and return its ID"""
+    def store_message(self, channel_id: int, message_text: str, telegram_msg_id: int) -> int:
+        """Store raw message with Telegram message ID and return database ID"""
         with self.get_connection() as conn:
             cursor = conn.execute('''
-                INSERT INTO messages (channel_id, timestamp, raw_message)
-                VALUES (?, ?, ?)
-            ''', (channel_id, datetime.now().isoformat(), message_text))
+                INSERT INTO messages (channel_id, telegram_msg_id, timestamp, raw_message)
+                VALUES (?, ?, ?, ?)
+            ''', (channel_id, telegram_msg_id, datetime.now().isoformat(), message_text))
             return cursor.lastrowid
     
     # === SIGNAL OPERATIONS ===
@@ -138,6 +143,107 @@ class Database:
                 SET status = ?, mt5_ticket = ?, error_message = ?
                 WHERE id = ?
             ''', (status, mt5_ticket, error_message, signal_id))
+    
+    def get_signal_by_message_id(self, message_id: int) -> Optional[Dict]:
+        """
+        Lookup signal by Telegram message ID for position modification.
+        
+        Args:
+            message_id: Telegram message ID
+            
+        Returns:
+            Dict with ticket_id, symbol, action, stop_loss, take_profit or None
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute('''
+                SELECT mt5_ticket, symbol, action, stop_loss, take_profit
+                FROM signals 
+                WHERE message_id = ?
+            ''', (message_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'ticket_id': row[0],
+                    'symbol': row[1],
+                    'action': row[2],
+                    'stop_loss': row[3],
+                    'take_profit': row[4]
+                }
+            return None
+    
+    def get_signal_by_telegram_msg_id(self, telegram_msg_id: int) -> Optional[Dict]:
+        """
+        Lookup signal by Telegram message ID for position modification.
+        Uses JOIN to bridge telegram_msg_id → database message_id → signal.
+        
+        Args:
+            telegram_msg_id: Telegram's internal message ID (from reply_to_msg_id)
+            
+        Returns:
+            Dict with ticket_id, symbol, action, stop_loss, take_profit or None
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute('''
+                SELECT s.mt5_ticket, s.symbol, s.action, s.stop_loss, s.take_profit
+                FROM signals s
+                JOIN messages m ON s.message_id = m.id
+                WHERE m.telegram_msg_id = ?
+            ''', (telegram_msg_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'ticket_id': row[0],
+                    'symbol': row[1],
+                    'action': row[2],
+                    'stop_loss': row[3],
+                    'take_profit': row[4]
+                }
+            return None
+    
+    def update_signal_sltp(self, message_id: int, stop_loss: Optional[float], 
+                           take_profit: Optional[float]) -> bool:
+        """
+        Update SL/TP after position modification.
+        
+        Args:
+            message_id: Telegram message ID
+            stop_loss: New stop loss value
+            take_profit: New take profit value
+            
+        Returns:
+            True if successful
+        """
+        with self.get_connection() as conn:
+            conn.execute('''
+                UPDATE signals 
+                SET stop_loss = ?, take_profit = ?, status = 'MODIFIED'
+                WHERE message_id = ?
+            ''', (stop_loss, take_profit, message_id))
+            return True
+    
+    def update_signal_sltp_by_telegram_id(self, telegram_msg_id: int, 
+                                           stop_loss: Optional[float], 
+                                           take_profit: Optional[float]) -> bool:
+        """
+        Update SL/TP after position modification using Telegram message ID.
+        
+        Args:
+            telegram_msg_id: Telegram's internal message ID
+            stop_loss: New stop loss value
+            take_profit: New take profit value
+            
+        Returns:
+            True if successful
+        """
+        with self.get_connection() as conn:
+            conn.execute('''
+                UPDATE signals 
+                SET stop_loss = ?, take_profit = ?, status = 'MODIFIED'
+                WHERE message_id IN (
+                    SELECT id FROM messages WHERE telegram_msg_id = ?
+                )
+            ''', (stop_loss, take_profit, telegram_msg_id))
+            return True
     
     # === POSITION OPERATIONS ===
     

@@ -15,16 +15,32 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from symbol_resolver import SymbolResolver
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class Signal:
     """Parsed trading signal data"""
-    action: str              # BUY, SELL, or CLOSE
-    symbol: str              # e.g., XAUUSD
+    action: Optional[str]              # BUY, SELL, CLOSE, or None
+    symbol: Optional[str]              # e.g., XAUUSD, or None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    
+    # NEW: Multi-message support fields
+    is_complete: bool = False          # True if has action+symbol+SL/TP
+    signal_type: str = 'UNKNOWN'       # COMPLETE, ENTRY_ONLY, PARAMS_ONLY, INVALID
+    
+    def __str__(self) -> str:
+        """Human-readable representation"""
+        if self.signal_type == 'COMPLETE':
+            return f"{self.action} {self.symbol} | SL: {self.stop_loss} | TP: {self.take_profit}"
+        elif self.signal_type == 'ENTRY_ONLY':
+            return f"{self.action} {self.symbol} (no SL/TP)"
+        elif self.signal_type == 'PARAMS_ONLY':
+            return f"SL: {self.stop_loss} | TP: {self.take_profit}"
+        return "INVALID"
 
 
 class SignalParser:
@@ -53,41 +69,80 @@ class SignalParser:
             
             # === STEP 2: Detect action type (BUY/SELL/CLOSE) ===
             action = self._extract_action(text)
-            if not action:
-                logger.debug(f"No action found in: {message_text[:50]}...")
-                return None
             
             # === STEP 3: Extract symbol ===
             symbol = self._extract_symbol(text)
-            if not symbol:
-                logger.debug(f"No valid symbol found in: {message_text[:50]}...")
-                return None
             
-            # === STEP 4: For CLOSE signals, we don't need SL/TP ===
-            if action == 'CLOSE':
-                logger.info(f"📍 Parsed CLOSE signal: {symbol}")
-                return Signal(action='CLOSE', symbol=symbol)
-            
-            # === STEP 5: Extract Stop Loss and Take Profit ===
+            # === STEP 4: Extract Stop Loss and Take Profit ===
             stop_loss = self._extract_price(text, 'SL')
             take_profit = self._extract_price(text, 'TP')
             
-            # Validate that we have at least SL for BUY/SELL
-            if stop_loss is None:
-                logger.warning(f"No stop loss found for {action} {symbol}")
-                # Still return signal but without SL - user may want to set manually
+            # === STEP 5: For CLOSE signals (special handling) ===
+            if action == 'CLOSE' and symbol:
+                logger.info(f"📍 Parsed CLOSE signal: {symbol}")
+                return Signal(action='CLOSE', symbol=symbol)
             
-            logger.info(f"📍 Parsed signal: {action} {symbol} | SL: {stop_loss} | TP: {take_profit}")
-            return Signal(
+            # Log warnings for incomplete signals
+            if action and symbol and not stop_loss and not take_profit:
+                logger.warning(f"No stop loss found for {action} {symbol}")
+            
+            # === STEP 6: Create signal object ===
+            signal = Signal(
                 action=action,
                 symbol=symbol,
                 stop_loss=stop_loss,
                 take_profit=take_profit
             )
             
+            # === STEP 7: Classify signal completeness ===
+            signal.signal_type = self.classify_signal(signal)
+            
+            # === STEP 8: Validate and return ===
+            if signal.signal_type == 'INVALID':
+                logger.debug(f"Invalid signal - missing critical fields")
+                return None
+            
+            # Log parsed signal
+            if signal.signal_type == 'COMPLETE':
+                logger.info(f"📍 Parsed COMPLETE: {signal}")
+            elif signal.signal_type == 'ENTRY_ONLY':
+                logger.info(f"📍 Parsed ENTRY_ONLY: {signal}")
+            elif signal.signal_type == 'PARAMS_ONLY':
+                logger.info(f"📍 Parsed PARAMS_ONLY: {signal}")
+            
+            return signal
+            
         except Exception as e:
             logger.error(f"Parsing error: {e}")
             return None
+    
+    def classify_signal(self, signal: Signal) -> str:
+        """
+        Classify signal completeness and update signal metadata.
+        
+        Returns:
+            'COMPLETE', 'ENTRY_ONLY', 'PARAMS_ONLY', or 'INVALID'
+        
+        Logic:
+            COMPLETE     = has action + symbol + (SL or TP)
+            ENTRY_ONLY   = has action + symbol, missing SL/TP
+            PARAMS_ONLY  = has SL/TP, missing action + symbol
+            INVALID      = missing critical fields
+        """
+        has_entry = (signal.action is not None and signal.symbol is not None)
+        has_params = (signal.stop_loss is not None or signal.take_profit is not None)
+        
+        if has_entry and has_params:
+            signal.is_complete = True
+            return 'COMPLETE'
+        elif has_entry and not has_params:
+            signal.is_complete = False
+            return 'ENTRY_ONLY'
+        elif not has_entry and has_params:
+            signal.is_complete = False
+            return 'PARAMS_ONLY'
+        else:
+            return 'INVALID'
     
     def _normalize_text(self, text: str) -> str:
         """Normalize message text for consistent parsing"""
@@ -103,11 +158,10 @@ class SignalParser:
             'TAKEPROFIT': 'TP',
             'TAKE-PROFIT': 'TP',
             'TARGET': 'TP',
-            '..GOLD': '',      # Remove Gold suffix
-            '.. GOLD': '',     # Remove Gold suffix with space
-            'GOLD NOW': '',    # Remove "Gold Now"
-            'NOW !': '',       # Remove trailing "Now !"
-            'NOW!': '',
+            '..GOLD': '',      # Remove Gold suffix (e.g., "XAUUSD..Gold")
+            '.. GOLD': '',     # Remove Gold suffix with space (e.g., "XAUUSD .. Gold")
+            # Note: Don't remove 'GOLD NOW' - it could be the symbol itself!
+            # We'll let SymbolResolver handle GOLD → XAUUSD conversion
         }
         
         for old, new in replacements.items():
@@ -132,9 +186,22 @@ class SignalParser:
         return None
     
     def _extract_symbol(self, text: str) -> Optional[str]:
-        """Extract forex symbol from text"""
-        # Pattern: 6-7 uppercase letters (forex pairs)
-        # Common patterns: XAUUSD, EURUSD, GBPJPY, etc.
+        """
+        Extract symbol using multi-strategy approach.
+        
+        Strategy 1: Direct 6-7 char symbol match (XAUUSD, BTCUSD)
+        Strategy 2: Alias resolution (GOLD → XAUUSD)
+        
+        Returns:
+            Official MT5 symbol or None
+        """
+        # Strategy 1: Try alias resolution FIRST (more comprehensive)
+        alias_symbol = SymbolResolver.resolve(text)
+        if alias_symbol:
+            logger.info(f"🔍 Resolved alias to: {alias_symbol}")
+            return alias_symbol
+        
+        # Strategy 2: Direct symbol match fallback (for symbols not in alias map)
         symbol_pattern = r'\b([A-Z]{6,7})\b'
         matches = re.findall(symbol_pattern, text)
         
@@ -142,29 +209,34 @@ class SignalParser:
             # Validate against known symbols
             if match in self.valid_symbols:
                 return match
-            # Also accept any 6-char forex pair format (XXX/XXX)
-            if len(match) == 6 and match[:3] != match[3:]:
-                return match
         
         return None
     
     def _extract_price(self, text: str, price_type: str) -> Optional[float]:
         """
-        Extract price value for SL or TP.
+        Extract price value for SL or TP with multiple format support.
 
         Handles various formats:
-        - "SL : 4014.427" (decimal with colon)
-        - "SL: 80000" (integer with colon)
-        - "SL – 80000" (integer with em-dash)
-        - "SL – 1.0820" (decimal with em-dash)
-        - "SL 4014.427" (decimal with space only)
-        - "SL 80000" (integer with space only)
+        - "SL: 4014.427" / "sl: 4014.427"
+        - "TP – 80000" / "tp – 80000"
+        - "stop loss: 2650" / "Stop Loss: 2650"
+        - "take profit: 2700" / "Take Profit: 2700"
+        - "SL 4014.427" (space only)
+        - "TP 80000" (space only)
         """
-        # Pattern: keyword + optional separators (colon, em-dash, hyphen, space) + number (integer OR decimal)
-        # (?:\.[\d]+)? makes the decimal part optional
-        pattern = rf'{price_type}\s*[:\s–-]*\s*([\d]+(?:\.[\d]+)?)'
+        text_upper = text.upper()
+        
+        # Build pattern based on price type
+        if price_type.upper() == 'TP':
+            # Match: TP, tp, take profit, Take Profit, TAKE PROFIT
+            pattern = r'(?:TP|TAKE\s*PROFIT)\s*[:\s–-]*\s*([\d]+(?:\.[\d]+)?)'
+        elif price_type.upper() == 'SL':
+            # Match: SL, sl, stop loss, Stop Loss, STOP LOSS
+            pattern = r'(?:SL|STOP\s*LOSS)\s*[:\s–-]*\s*([\d]+(?:\.[\d]+)?)'
+        else:
+            return None
 
-        match = re.search(pattern, text)
+        match = re.search(pattern, text_upper, re.IGNORECASE)
         if match:
             try:
                 return float(match.group(1))
@@ -178,19 +250,38 @@ class SignalParser:
         """
         Quick check if message might contain a signal.
         Use before full parsing for efficiency.
+        
+        Updated to support:
+        - Traditional signals (action + symbol + SL/TP)
+        - Entry-only signals (action + symbol/alias)
+        - Params-only signals (just SL/TP)
         """
         if not message_text:
             return False
         
         text_upper = message_text.upper()
         
-        # Must have action keyword
+        # Check for action keywords (BUY, SELL, CLOSE)
         has_action = any(word in text_upper for word in ['BUY', 'SELL', 'CLOSE'])
         
-        # Must have symbol-like pattern
+        # Check for symbol-like pattern (6-7 uppercase letters)
         has_symbol = bool(re.search(r'[A-Z]{6,7}', text_upper))
         
-        return has_action and has_symbol
+        # Check for symbol aliases (GOLD, BTC, SILVER, etc.)
+        has_alias = any(alias in text_upper for alias in [
+            'GOLD', 'SILVER', 'BITCOIN', 'BTC', 'ETH', 'ETHEREUM',
+            'EUR', 'GBP', 'CABLE', 'AUSSIE', 'LOONIE', 'OIL'
+        ])
+        
+        # Check for TP/SL keywords (for PARAMS_ONLY signals)
+        has_params = any(keyword in text_upper for keyword in [
+            'TP', 'SL', 'TAKE PROFIT', 'STOP LOSS'
+        ])
+        
+        # Signal is valid if:
+        # 1. Has action + (symbol OR alias), OR
+        # 2. Has params (TP/SL)
+        return (has_action and (has_symbol or has_alias)) or has_params
 
 
 # === TESTING UTILITY ===
@@ -206,7 +297,7 @@ def test_parser():
     parser = SignalParser()
     
     test_messages = [
-        # BUY signals
+        # BUY signals (COMPLETE)
         ("BUY #1", """Day 2 .. Buy XAUUSD ..Gold Now !
 Stop loss : 4014.427
 Take profit : 4055.964"""),
@@ -219,7 +310,7 @@ Take profit : 4143.328"""),
 Stop loss : 3986.492
 Take Profit : 4007.452"""),
         
-        # SELL signals
+        # SELL signals (COMPLETE)
         ("SELL #1", """Mrbluemax Forex Academy
 Sell XAUUSD .. Gold now
 Stop loss :4046.138
@@ -233,6 +324,34 @@ Take Profit:4030.353"""),
         # CLOSE signals
         ("CLOSE #1", "Close XAUUSD..Gold on 100 pips Now !"),
         ("CLOSE #2", "Close XAUUSD now on 100 pips"),
+        
+        # === NEW: Two-message signal support ===
+        
+        # ENTRY_ONLY signals (action + symbol, no SL/TP)
+        ("ENTRY_ONLY #1", "SELL GOLD NOW"),
+        ("ENTRY_ONLY #2", "BUY BTC NOW"),
+        ("ENTRY_ONLY #3", "BUY XAUUSD NOW"),
+        ("ENTRY_ONLY #4", "SELL SILVER"),
+        
+        # PARAMS_ONLY signals (SL/TP, no action/symbol)
+        ("PARAMS_ONLY #1", "TP 2700 SL 2650"),
+        ("PARAMS_ONLY #2", "SL: 80000\nTP: 95000"),
+        ("PARAMS_ONLY #3", "take profit: 2700\nstop loss: 2650"),
+        ("PARAMS_ONLY #4", "TP – 4055.964\nSL – 4014.427"),
+        
+        # TP/SL format variations
+        ("TP_FORMAT #1", "tp: 2700"),
+        ("TP_FORMAT #2", "take profit - 2700"),
+        ("TP_FORMAT #3", "Take Profit 2700"),
+        ("SL_FORMAT #1", "sl: 2650"),
+        ("SL_FORMAT #2", "stop loss - 2650"),
+        ("SL_FORMAT #3", "Stop Loss 2650"),
+        
+        # Symbol alias resolution
+        ("ALIAS #1", "BUY GOLD SL 2650 TP 2700"),
+        ("ALIAS #2", "SELL SILVER NOW"),
+        ("ALIAS #3", "BUY BITCOIN SL 80000 TP 95000"),
+        ("ALIAS #4", "SELL CABLE SL 1.25 TP 1.22"),  # GBPUSD nickname
         
         # Non-signals (should return None)
         ("NON-SIGNAL #1", "I need to teach you guys this my new strategy, it's too good !"),

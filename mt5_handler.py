@@ -202,3 +202,64 @@ class MT5Handler:
         """Close all positions for symbol"""
         positions = await self.get_positions(symbol)
         return [await self.close_position(p['ticket']) for p in positions]
+    
+    # === POSITION MODIFICATION ===
+    
+    def _position_modify_sync(self, ticket_id: int, stop_loss: Optional[float],
+                              take_profit: Optional[float]) -> Dict[str, Any]:
+        """Modify SL/TP on existing position using TRADE_ACTION_SLTP (sync)"""
+        try:
+            # Get position info first
+            position = mt5.positions_get(ticket=ticket_id)
+            if not position:
+                return {'success': False, 'error': f'Position {ticket_id} not found'}
+            
+            position = position[0]
+            
+            # Build request for TRADE_ACTION_SLTP
+            request = {
+                'action': mt5.TRADE_ACTION_SLTP,
+                'position': ticket_id,
+                'symbol': position.symbol,
+                'sl': stop_loss if stop_loss else position.sl,
+                'tp': take_profit if take_profit else position.tp,
+            }
+            
+            # Send modification request
+            result = mt5.order_send(request)
+            
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                logger.info(f"✅ Modified position {ticket_id}: SL={stop_loss}, TP={take_profit}")
+                return {
+                    'success': True,
+                    'ticket': ticket_id,
+                    'message': f'Position {ticket_id} modified successfully'
+                }
+            else:
+                error_msg = f"Failed to modify position: {result.comment}"
+                logger.error(error_msg)
+                return {'success': False, 'error': error_msg}
+                
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    async def position_modify(self, ticket_id: int, stop_loss: Optional[float] = None,
+                              take_profit: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Modify SL/TP on existing position (async).
+        
+        Args:
+            ticket_id: MT5 position ticket ID
+            stop_loss: New stop loss value (or None to keep existing)
+            take_profit: New take profit value (or None to keep existing)
+            
+        Returns:
+            Dict with success status and message
+        """
+        if not self.initialized:
+            return {'success': False, 'error': 'MT5 not initialized'}
+        
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self.executor, self._position_modify_sync, ticket_id, stop_loss, take_profit
+        )
