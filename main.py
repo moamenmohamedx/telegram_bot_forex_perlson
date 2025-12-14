@@ -180,13 +180,13 @@ class TradingBot:
                 # TP/SL parameters - check if this is a reply to a pending entry
                 if event.message.reply_to_msg_id:
                     if not config.TRADING_ENABLED:
-                        logger.info("DRY-RUN mode - Pending entry execution logged but not executed")
-                        await event.reply(f"⚠️ DRY-RUN mode - Would execute pending entry with TP={signal.take_profit} SL={signal.stop_loss}")
+                        logger.info("⚠️ DRY-RUN mode - Would execute pending entry with TP={signal.take_profit} SL={signal.stop_loss}")
+                        # No reply - monitoring privately
                         return
                     
                     if not self.mt5.initialized:
-                        logger.warning("MT5 not initialized - Cannot execute pending entry")
-                        await event.reply("⚠️ MT5 offline - Cannot execute pending entry")
+                        logger.warning("⚠️ MT5 offline - Cannot execute pending entry")
+                        # No reply - monitoring privately
                         return
                     
                     await self._handle_params_reply(signal, event)
@@ -235,7 +235,7 @@ class TradingBot:
         self.db.update_signal_status(signal_id, 'PENDING_ENTRY')
         
         logger.info(f"📋 Stored pending entry #{signal_id}: {signal.action} {signal.symbol}")
-        await event.reply(f"📋 {signal.action} {signal.symbol} queued - reply with TP and SL to execute")
+        # No reply - monitoring privately
     
     async def _handle_params_reply(self, signal, event) -> None:
         """Execute pending entry when TP/SL reply arrives"""
@@ -247,8 +247,8 @@ class TradingBot:
         
         # === STEP 1: Validate BOTH TP and SL present ===
         if signal.stop_loss is None or signal.take_profit is None:
-            logger.warning(f"Reply missing TP or SL: tp={signal.take_profit}, sl={signal.stop_loss}")
-            await event.reply("⚠️ Need both TP and SL to execute trade")
+            logger.warning(f"⚠️ Reply missing TP or SL: tp={signal.take_profit}, sl={signal.stop_loss}")
+            # No reply - monitoring privately
             return
         
         logger.info(f"🔍 Looking up pending entry for Telegram message ID: {reply_to_id}")
@@ -257,14 +257,14 @@ class TradingBot:
         pending = self.db.get_pending_entry_by_telegram_msg_id(reply_to_id)
         
         if not pending:
-            logger.warning(f"No pending entry found for message_id {reply_to_id}")
-            await event.reply("⚠️ No pending entry found for this message")
+            logger.warning(f"⚠️ No pending entry found for message_id {reply_to_id}")
+            # No reply - monitoring privately
             return
         
         # === STEP 3: Check if already executed (duplicate reply) ===
         if pending['status'] != 'PENDING_ENTRY':
-            logger.warning(f"Signal {pending['signal_id']} already processed (status: {pending['status']})")
-            await event.reply("⚠️ Trade already executed for this signal")
+            logger.warning(f"⚠️ Signal {pending['signal_id']} already processed (status: {pending['status']})")
+            # No reply - monitoring privately
             return
         
         # === STEP 4: Execute trade with full parameters ===
@@ -292,11 +292,11 @@ class TradingBot:
             )
             
             logger.info(f"✅ Executed {pending['action']} {pending['symbol']} @ {result['price']} | TP: {signal.take_profit} | SL: {signal.stop_loss} | Ticket: #{ticket_id}")
-            await event.reply(f"✅ Executed {pending['action']} {pending['symbol']} @ {result['price']} | TP: {signal.take_profit} | SL: {signal.stop_loss} | Ticket: #{ticket_id}")
+            # No reply - monitoring privately
         else:
             logger.error(f"❌ Failed to execute pending entry: {result['error']}")
             self.db.update_signal_status(pending['signal_id'], 'ERROR', error_message=result['error'])
-            await event.reply(f"❌ Failed to execute: {result['error']}")
+            # No reply - monitoring privately
     
     async def stop(self) -> None:
         """Cleanup"""
