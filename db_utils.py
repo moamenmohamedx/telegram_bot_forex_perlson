@@ -45,7 +45,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     message_id INTEGER NOT NULL,
                     timestamp TEXT NOT NULL,
-                    action TEXT CHECK(action IN ('BUY', 'SELL', 'CLOSE')),
+                    action TEXT CHECK(action IN ('BUY', 'SELL')),
                     symbol TEXT NOT NULL,
                     stop_loss REAL,
                     take_profit REAL,
@@ -57,7 +57,7 @@ class Database:
             ''')
             
             # === TABLE 3: Active Positions ===
-            # Track open positions for CLOSE signal handling
+            # Track open positions
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS positions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -268,15 +268,6 @@ class Database:
                 ORDER BY opened_at DESC
             ''', (symbol,))
             return [dict(row) for row in cursor.fetchall()]
-    
-    def close_position(self, position_id: int, close_price: float, pips: float) -> None:
-        """Mark position as closed"""
-        with self.get_connection() as conn:
-            conn.execute('''
-                UPDATE positions
-                SET status = 'CLOSED', closed_at = ?, close_price = ?, pips = ?
-                WHERE id = ?
-            ''', (datetime.now().isoformat(), close_price, pips, position_id))
     
     # === STATISTICS ===
     

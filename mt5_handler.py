@@ -149,60 +149,6 @@ class MT5Handler:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._place_order_sync, action, symbol, sl, tp)
     
-    # === POSITION MANAGEMENT ===
-    
-    def _get_positions_sync(self, symbol: Optional[str] = None) -> List[Dict]:
-        """Get positions (sync)"""
-        try:
-            positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
-            if not positions:
-                return []
-            
-            return [{'ticket': p.ticket, 'symbol': p.symbol, 'type': 'BUY' if p.type == 0 else 'SELL',
-                     'volume': p.volume, 'price_open': p.price_open, 'profit': p.profit} for p in positions]
-        except:
-            return []
-    
-    async def get_positions(self, symbol: Optional[str] = None) -> List[Dict]:
-        """Get positions (async)"""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, self._get_positions_sync, symbol)
-    
-    def _close_position_sync(self, ticket: int) -> Dict[str, Any]:
-        """Close position (sync)"""
-        try:
-            position = mt5.positions_get(ticket=ticket)
-            if not position:
-                return {'success': False, 'error': 'Position not found'}
-            
-            pos = position[0]
-            order_type = mt5.ORDER_TYPE_SELL if pos.type == 0 else mt5.ORDER_TYPE_BUY
-            price = mt5.symbol_info_tick(pos.symbol).bid if pos.type == 0 else mt5.symbol_info_tick(pos.symbol).ask
-            
-            request = {
-                'action': mt5.TRADE_ACTION_DEAL, 'symbol': pos.symbol, 'volume': pos.volume,
-                'type': order_type, 'position': ticket, 'price': price, 'deviation': 20,
-                'magic': pos.magic, 'comment': 'close', 'type_time': mt5.ORDER_TIME_GTC,
-                'type_filling': mt5.ORDER_FILLING_IOC
-            }
-            
-            result = mt5.order_send(request)
-            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                return {'success': True, 'ticket': ticket, 'close_price': result.price}
-            return {'success': False, 'error': result.comment if result else 'Failed'}
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-    
-    async def close_position(self, ticket: int) -> Dict[str, Any]:
-        """Close position (async)"""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.executor, self._close_position_sync, ticket)
-    
-    async def close_all_positions(self, symbol: str) -> List[Dict[str, Any]]:
-        """Close all positions for symbol"""
-        positions = await self.get_positions(symbol)
-        return [await self.close_position(p['ticket']) for p in positions]
-    
     # === POSITION MODIFICATION ===
     
     def _position_modify_sync(self, ticket_id: int, stop_loss: Optional[float],

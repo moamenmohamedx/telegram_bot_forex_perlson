@@ -7,7 +7,6 @@ Signal Formats Supported:
 -------------------------
 BUY:  "Buy XAUUSD .. Gold now !" + "Stop loss : 4014.427" + "Take profit : 4055.964"
 SELL: "Sell XAUUSD .. Gold now ⬇️" + "Stop loss :4046.138" + "Take Profit:4029.901"
-CLOSE: "Close XAUUSD..Gold on 100 pips Now !" or "Close now on 100 pips"
 """
 
 import re
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Signal:
     """Parsed trading signal data"""
-    action: Optional[str]              # BUY, SELL, CLOSE, or None
+    action: Optional[str]              # BUY, SELL, or None
     symbol: Optional[str]              # e.g., XAUUSD, or None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
@@ -67,7 +66,7 @@ class SignalParser:
             # === STEP 1: Clean and normalize text ===
             text = self._normalize_text(message_text)
             
-            # === STEP 2: Detect action type (BUY/SELL/CLOSE) ===
+            # === STEP 2: Detect action type (BUY/SELL) ===
             action = self._extract_action(text)
             
             # === STEP 3: Extract symbol ===
@@ -77,16 +76,11 @@ class SignalParser:
             stop_loss = self._extract_price(text, 'SL')
             take_profit = self._extract_price(text, 'TP')
             
-            # === STEP 5: For CLOSE signals (special handling) ===
-            if action == 'CLOSE' and symbol:
-                logger.info(f"📍 Parsed CLOSE signal: {symbol}")
-                return Signal(action='CLOSE', symbol=symbol)
-            
             # Log warnings for incomplete signals
             if action and symbol and not stop_loss and not take_profit:
                 logger.warning(f"No stop loss found for {action} {symbol}")
             
-            # === STEP 6: Create signal object ===
+            # === STEP 5: Create signal object ===
             signal = Signal(
                 action=action,
                 symbol=symbol,
@@ -94,10 +88,10 @@ class SignalParser:
                 take_profit=take_profit
             )
             
-            # === STEP 7: Classify signal completeness ===
+            # === STEP 6: Classify signal completeness ===
             signal.signal_type = self.classify_signal(signal)
             
-            # === STEP 8: Validate and return ===
+            # === STEP 7: Validate and return ===
             if signal.signal_type == 'INVALID':
                 logger.debug(f"Invalid signal - missing critical fields")
                 return None
@@ -171,10 +165,6 @@ class SignalParser:
     
     def _extract_action(self, text: str) -> Optional[str]:
         """Extract trading action from normalized text"""
-        # Check for CLOSE first (most specific)
-        if re.search(r'\bCLOSE\b', text):
-            return 'CLOSE'
-        
         # Check for BUY
         if re.search(r'\bBUY\b', text):
             return 'BUY'
@@ -261,8 +251,8 @@ class SignalParser:
         
         text_upper = message_text.upper()
         
-        # Check for action keywords (BUY, SELL, CLOSE)
-        has_action = any(word in text_upper for word in ['BUY', 'SELL', 'CLOSE'])
+        # Check for action keywords (BUY, SELL)
+        has_action = any(word in text_upper for word in ['BUY', 'SELL'])
         
         # Check for symbol-like pattern (6-7 uppercase letters)
         has_symbol = bool(re.search(r'[A-Z]{6,7}', text_upper))
@@ -320,10 +310,6 @@ Take Profit:4029.901"""),
 Sell XAUUSD .. Gold now
 Stop loss :4052.555
 Take Profit:4030.353"""),
-        
-        # CLOSE signals
-        ("CLOSE #1", "Close XAUUSD..Gold on 100 pips Now !"),
-        ("CLOSE #2", "Close XAUUSD now on 100 pips"),
         
         # === NEW: Two-message signal support ===
         

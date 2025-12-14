@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Signal:
     """Parsed trading signal data"""
-    action: str              # BUY, SELL, or CLOSE
+    action: str              # BUY or SELL
     symbol: str              # e.g., XAUUSD
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
@@ -70,7 +70,7 @@ class SignalParser:
             # === STEP 1: Clean and normalize text (but preserve symbol aliases) ===
             text = self._normalize_text(message_text)
             
-            # === STEP 2: Detect action type (BUY/SELL/CLOSE) ===
+            # === STEP 2: Detect action type (BUY/SELL) ===
             action = self._extract_action(text)
             if not action:
                 logger.debug(f"No action found in: {message_text[:50]}...")
@@ -85,12 +85,7 @@ class SignalParser:
             # === STEP 3B: Now do additional normalization for price extraction ===
             text = self._normalize_for_symbol_extraction(text)
             
-            # === STEP 4: For CLOSE signals, we don't need SL/TP ===
-            if action == 'CLOSE':
-                logger.info(f"📍 Parsed CLOSE signal: {symbol}")
-                return Signal(action='CLOSE', symbol=symbol)
-            
-            # === STEP 5: Extract Stop Loss and Take Profit ===
+            # === STEP 4: Extract Stop Loss and Take Profit ===
             stop_loss = self._extract_price(text, 'SL')
             take_profit = self._extract_price(text, 'TP')
             
@@ -99,7 +94,7 @@ class SignalParser:
                 logger.warning(f"No stop loss found for {action} {symbol}")
                 # Still return signal but without SL - user may want to set manually
             
-            # === STEP 6: Create and validate signal ===
+            # === STEP 5: Create and validate signal ===
             signal = Signal(
                 action=action,
                 symbol=symbol,
@@ -163,10 +158,6 @@ class SignalParser:
     
     def _extract_action(self, text: str) -> Optional[str]:
         """Extract trading action from normalized text"""
-        # Check for CLOSE first (most specific)
-        if re.search(r'\bCLOSE\b', text):
-            return 'CLOSE'
-        
         # Check for BUY
         if re.search(r'\bBUY\b', text):
             return 'BUY'
@@ -265,7 +256,7 @@ class SignalParser:
             return False, f"Invalid symbol length: {signal.symbol} (must be 6-7 characters)"
         
         # === CHECK 3: Action is valid ===
-        if signal.action not in ['BUY', 'SELL', 'CLOSE']:
+        if signal.action not in ['BUY', 'SELL']:
             return False, f"Invalid action: {signal.action}"
         
         # === CHECK 4: For BUY/SELL, validate price logic ===
@@ -306,7 +297,7 @@ class SignalParser:
         text_upper = message_text.upper()
         
         # Must have action keyword
-        has_action = any(word in text_upper for word in ['BUY', 'SELL', 'CLOSE'])
+        has_action = any(word in text_upper for word in ['BUY', 'SELL'])
         
         # Must have symbol-like pattern OR alias
         has_symbol_pattern = bool(re.search(r'[A-Z]{6,7}', text_upper))
@@ -363,10 +354,6 @@ TP – 4,205.58"""),
 Sell XAUUSD .. Gold now
 Stop loss :4046.138
 Take Profit:4029.901"""),
-        
-        # === CLOSE SIGNALS ===
-        ("Close #1", "Close XAUUSD..Gold on 100 pips Now !"),
-        ("Close #2", "Close BTCUSD now on 100 pips"),
         
         # === NON-SIGNALS (Should return None) ===
         ("Non-signal #1", "I need to teach you guys this my new strategy, it's too good !"),

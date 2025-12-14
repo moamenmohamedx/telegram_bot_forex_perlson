@@ -154,10 +154,7 @@ class TradingBot:
                     self.db.update_signal_status(signal_id, 'MT5_OFFLINE')
                     return
                 
-                if signal.action == 'CLOSE':
-                    await self._handle_close_signal(signal, signal_id)
-                else:
-                    await self._handle_trade_signal(signal, signal_id)
+                await self._handle_trade_signal(signal, signal_id)
             
             elif signal.signal_type == 'ENTRY_ONLY':
                 # Entry signal without SL/TP - execute immediately, wait for params via reply
@@ -224,26 +221,6 @@ class TradingBot:
         else:
             logger.error(f"FAILED - {result['error']}")
             self.db.update_signal_status(signal_id, 'ERROR', error_message=result['error'])
-    
-    async def _handle_close_signal(self, signal, signal_id: int) -> None:
-        """Close all positions for symbol"""
-        logger.info(f"Closing {signal.symbol} positions...")
-        
-        positions = await self.mt5.get_positions(signal.symbol)
-        if not positions:
-            logger.warning(f"No open positions for {signal.symbol}")
-            self.db.update_signal_status(signal_id, 'NO_POSITIONS')
-            return
-        
-        results = await self.mt5.close_all_positions(signal.symbol)
-        success_count = sum(1 for r in results if r.get('success'))
-        
-        if success_count == len(positions):
-            logger.info(f"Closed {success_count} position(s)")
-            self.db.update_signal_status(signal_id, 'SUCCESS')
-        else:
-            logger.warning(f"Closed {success_count}/{len(positions)}")
-            self.db.update_signal_status(signal_id, 'PARTIAL')
     
     async def _handle_entry_signal(self, signal, message_id: int, event) -> None:
         """Execute entry signal immediately, store for later TP/SL modification"""
