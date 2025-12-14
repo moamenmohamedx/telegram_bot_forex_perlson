@@ -200,6 +200,34 @@ class Database:
                 }
             return None
     
+    def get_pending_entry_by_telegram_msg_id(self, telegram_msg_id: int) -> Optional[Dict]:
+        """
+        Get pending entry signal by Telegram message ID.
+        Uses same JOIN pattern to bridge telegram_msg_id → database message_id → signal.
+        
+        Args:
+            telegram_msg_id: Telegram's message ID (from reply_to_msg_id)
+        
+        Returns:
+            Dict with signal_id, action, symbol, status or None
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute('''
+                SELECT s.id, s.action, s.symbol, s.status
+                FROM signals s
+                JOIN messages m ON s.message_id = m.id
+                WHERE m.telegram_msg_id = ?
+            ''', (telegram_msg_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'signal_id': row[0],
+                    'action': row[1],
+                    'symbol': row[2],
+                    'status': row[3]
+                }
+            return None
+    
     def update_signal_sltp(self, message_id: int, stop_loss: Optional[float], 
                            take_profit: Optional[float]) -> bool:
         """
@@ -243,6 +271,27 @@ class Database:
                     SELECT id FROM messages WHERE telegram_msg_id = ?
                 )
             ''', (stop_loss, take_profit, telegram_msg_id))
+            return True
+    
+    def update_signal_sltp_by_id(self, signal_id: int,
+                                  stop_loss: float, take_profit: float) -> bool:
+        """
+        Update SL/TP on signal by signal ID.
+        
+        Args:
+            signal_id: Signal database ID
+            stop_loss: New stop loss value
+            take_profit: New take profit value
+            
+        Returns:
+            True if successful
+        """
+        with self.get_connection() as conn:
+            conn.execute('''
+                UPDATE signals
+                SET stop_loss = ?, take_profit = ?
+                WHERE id = ?
+            ''', (stop_loss, take_profit, signal_id))
             return True
     
     # === POSITION OPERATIONS ===

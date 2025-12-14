@@ -2,7 +2,7 @@
 Telegram-to-MT5 Trading Signal Bot
 ===================================
 Monitors Telegram channels for trading signals and executes them on MT5.
-
+Handle_message is the core Execution work flow of the app 
 Usage:
     python main.py
 """
@@ -177,22 +177,22 @@ class TradingBot:
                 await self._handle_entry_signal(signal, message_id, event)
             
             elif signal.signal_type == 'PARAMS_ONLY':
-                # TP/SL parameters - check if this is a reply to an entry signal
+                # TP/SL parameters - check if this is a reply to a pending entry
                 if event.message.reply_to_msg_id:
                     if not config.TRADING_ENABLED:
-                        logger.info("DRY-RUN mode - Position modification logged but not executed")
-                        await event.reply("⚠️ DRY-RUN mode - Would modify position with SL/TP")
+                        logger.info("DRY-RUN mode - Pending entry execution logged but not executed")
+                        await event.reply(f"⚠️ DRY-RUN mode - Would execute pending entry with TP={signal.take_profit} SL={signal.stop_loss}")
                         return
                     
                     if not self.mt5.initialized:
-                        logger.warning("MT5 not initialized - Cannot modify position")
-                        await event.reply("⚠️ MT5 offline - Cannot modify position")
+                        logger.warning("MT5 not initialized - Cannot execute pending entry")
+                        await event.reply("⚠️ MT5 offline - Cannot execute pending entry")
                         return
                     
                     await self._handle_params_reply(signal, event)
                 else:
                     logger.warning("PARAMS_ONLY signal without reply chain - ignoring")
-                    logger.warning("   TIP: Use Telegram REPLY feature for accurate matching")
+                    logger.warning("   TIP: Reply to an entry signal with TP/SL to execute")
             
             else:
                 logger.debug(f"Invalid signal type: {signal.signal_type}")
@@ -223,79 +223,80 @@ class TradingBot:
             self.db.update_signal_status(signal_id, 'ERROR', error_message=result['error'])
     
     async def _handle_entry_signal(self, signal, message_id: int, event) -> None:
-        """Execute entry signal immediately, store for later TP/SL modification"""
-        logger.info(f"📈 Entry signal: {signal.action} {signal.symbol} (no SL/TP)")
+        """Store entry signal as pending, wait for TP/SL reply before execution"""
+        # CRITICAL: NO mt5.place_order() here - just store pending
         
-        # Execute immediately
-        result = await self.mt5.place_order(
-            action=signal.action,
-            symbol=signal.symbol,
-            sl=None,  # No SL/TP - will be added later via reply
-            tp=None
+        logger.info(f"📋 Entry signal queued: {signal.action} {signal.symbol} (waiting for TP/SL)")
+        
+        # Store signal with PENDING_ENTRY status
+        signal_id = self.db.store_signal(
+            message_id, signal.action, signal.symbol, None, None
         )
+        self.db.update_signal_status(signal_id, 'PENDING_ENTRY')
         
-        if result['success']:
-            ticket_id = result['ticket']
-            
-            # Store signal with ticket and special status
-            signal_id = self.db.store_signal(
-                message_id, signal.action, signal.symbol,
-                None, None  # No SL/TP yet
-            )
-            self.db.update_signal_status(signal_id, 'EXECUTED_NO_SLTP', ticket_id)
-            
-            # Store position
-            self.db.store_position(
-                signal_id, signal.symbol, ticket_id,
-                signal.action, result['price'], result['volume']
-            )
-            
-            logger.info(f"✅ Opened {signal.action} {signal.symbol} #{ticket_id} (waiting for TP/SL)")
-            await event.reply(f"✅ Opened {signal.action} {signal.symbol} #{ticket_id} (waiting for TP/SL)")
-        else:
-            logger.error(f"❌ Failed to execute: {result['error']}")
-            signal_id = self.db.store_signal(
-                message_id, signal.action, signal.symbol,
-                None, None
-            )
-            self.db.update_signal_status(signal_id, 'ERROR', error_message=result['error'])
-            await event.reply(f"❌ Failed to execute: {result['error']}")
+        logger.info(f"📋 Stored pending entry #{signal_id}: {signal.action} {signal.symbol}")
+        await event.reply(f"📋 {signal.action} {signal.symbol} queued - reply with TP and SL to execute")
     
     async def _handle_params_reply(self, signal, event) -> None:
-        """Modify existing position when TP/SL reply arrives"""
+        """Execute pending entry when TP/SL reply arrives"""
         reply_to_id = event.message.reply_to_msg_id
         
         if not reply_to_id:
-            logger.warning("PARAMS_ONLY signal without reply chain - cannot match position")
+            logger.warning("PARAMS_ONLY signal without reply chain - cannot match pending entry")
             return
         
-        logger.info(f"🔍 Looking up position for Telegram message ID: {reply_to_id}")
-        
-        # Lookup original position by Telegram message_id
-        position_info = self.db.get_signal_by_telegram_msg_id(reply_to_id)
-        
-        if not position_info:
-            logger.warning(f"No position found for message_id {reply_to_id}")
-            await event.reply(f"⚠️ No open position found to modify")
+        # === STEP 1: Validate BOTH TP and SL present ===
+        if signal.stop_loss is None or signal.take_profit is None:
+            logger.warning(f"Reply missing TP or SL: tp={signal.take_profit}, sl={signal.stop_loss}")
+            await event.reply("⚠️ Need both TP and SL to execute trade")
             return
         
-        ticket_id = position_info['ticket_id']
+        logger.info(f"🔍 Looking up pending entry for Telegram message ID: {reply_to_id}")
         
-        # Modify the position
-        result = await self.mt5.position_modify(
-            ticket_id=ticket_id,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit
+        # === STEP 2: Lookup pending entry ===
+        pending = self.db.get_pending_entry_by_telegram_msg_id(reply_to_id)
+        
+        if not pending:
+            logger.warning(f"No pending entry found for message_id {reply_to_id}")
+            await event.reply("⚠️ No pending entry found for this message")
+            return
+        
+        # === STEP 3: Check if already executed (duplicate reply) ===
+        if pending['status'] != 'PENDING_ENTRY':
+            logger.warning(f"Signal {pending['signal_id']} already processed (status: {pending['status']})")
+            await event.reply("⚠️ Trade already executed for this signal")
+            return
+        
+        # === STEP 4: Execute trade with full parameters ===
+        logger.info(f"🚀 Executing: {pending['action']} {pending['symbol']} TP={signal.take_profit} SL={signal.stop_loss}")
+        
+        result = await self.mt5.place_order(
+            action=pending['action'],
+            symbol=pending['symbol'],
+            sl=signal.stop_loss,
+            tp=signal.take_profit
         )
         
+        # === STEP 5: Update database and respond ===
         if result['success']:
-            # Update database
-            self.db.update_signal_sltp_by_telegram_id(reply_to_id, signal.stop_loss, signal.take_profit)
-            logger.info(f"✅ Set TP={signal.take_profit} SL={signal.stop_loss} on #{ticket_id}")
-            await event.reply(f"✅ Set TP={signal.take_profit} SL={signal.stop_loss} on #{ticket_id}")
+            ticket_id = result['ticket']
+            
+            # Update signal with execution details
+            self.db.update_signal_status(pending['signal_id'], 'SUCCESS', ticket_id)
+            self.db.update_signal_sltp_by_id(pending['signal_id'], signal.stop_loss, signal.take_profit)
+            
+            # Store position
+            self.db.store_position(
+                pending['signal_id'], pending['symbol'], ticket_id,
+                pending['action'], result['price'], result['volume']
+            )
+            
+            logger.info(f"✅ Executed {pending['action']} {pending['symbol']} @ {result['price']} | TP: {signal.take_profit} | SL: {signal.stop_loss} | Ticket: #{ticket_id}")
+            await event.reply(f"✅ Executed {pending['action']} {pending['symbol']} @ {result['price']} | TP: {signal.take_profit} | SL: {signal.stop_loss} | Ticket: #{ticket_id}")
         else:
-            logger.error(f"❌ Failed to modify position: {result['error']}")
-            await event.reply(f"❌ Failed to modify position: {result['error']}")
+            logger.error(f"❌ Failed to execute pending entry: {result['error']}")
+            self.db.update_signal_status(pending['signal_id'], 'ERROR', error_message=result['error'])
+            await event.reply(f"❌ Failed to execute: {result['error']}")
     
     async def stop(self) -> None:
         """Cleanup"""
