@@ -296,10 +296,6 @@ trading_bot/
 
 MIT License - See LICENSE file for details.
 
-## Disclaimer
 
-This software is for educational purposes only. Trading forex and CFDs carries significant risk. Past performance is not indicative of future results. The authors are not responsible for any financial losses incurred through the use of this software.
-
----
 
 **Built with Python, Telethon, and MetaTrader5**
