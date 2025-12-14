@@ -180,7 +180,7 @@ class TradingBot:
                 # TP/SL parameters - check if this is a reply to a pending entry
                 if event.message.reply_to_msg_id:
                     if not config.TRADING_ENABLED:
-                        logger.info("⚠️ DRY-RUN mode - Would execute pending entry with TP={signal.take_profit} SL={signal.stop_loss}")
+                        logger.info(f"⚠️ DRY-RUN mode - Would execute pending entry with TP={signal.take_profit} SL={signal.stop_loss}")
                         # No reply - monitoring privately
                         return
                     
@@ -214,10 +214,6 @@ class TradingBot:
         if result['success']:
             logger.info(f"SUCCESS - Ticket: {result['ticket']} @ {result['price']}")
             self.db.update_signal_status(signal_id, 'SUCCESS', result['ticket'])
-            self.db.store_position(
-                signal_id, signal.symbol, result['ticket'],
-                signal.action, result['price'], result['volume']
-            )
         else:
             logger.error(f"FAILED - {result['error']}")
             self.db.update_signal_status(signal_id, 'ERROR', error_message=result['error'])
@@ -284,12 +280,6 @@ class TradingBot:
             # Update signal with execution details
             self.db.update_signal_status(pending['signal_id'], 'SUCCESS', ticket_id)
             self.db.update_signal_sltp_by_id(pending['signal_id'], signal.stop_loss, signal.take_profit)
-            
-            # Store position
-            self.db.store_position(
-                pending['signal_id'], pending['symbol'], ticket_id,
-                pending['action'], result['price'], result['volume']
-            )
             
             logger.info(f"✅ Executed {pending['action']} {pending['symbol']} @ {result['price']} | TP: {signal.take_profit} | SL: {signal.stop_loss} | Ticket: #{ticket_id}")
             # No reply - monitoring privately

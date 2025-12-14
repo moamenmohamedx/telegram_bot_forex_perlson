@@ -156,8 +156,3 @@ class SymbolResolver:
         })
         
         return official_symbols
-    
-    @classmethod
-    def is_valid_symbol(cls, symbol: str) -> bool:
-        """Check if symbol is a valid official symbol"""
-        return symbol.upper() in cls.get_all_official_symbols()

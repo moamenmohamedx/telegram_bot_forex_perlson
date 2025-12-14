@@ -56,26 +56,6 @@ class Database:
                 )
             ''')
             
-            # === TABLE 3: Active Positions ===
-            # Track open positions
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS positions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    signal_id INTEGER NOT NULL,
-                    symbol TEXT NOT NULL,
-                    mt5_ticket INTEGER NOT NULL,
-                    action TEXT NOT NULL,
-                    open_price REAL,
-                    lot_size REAL,
-                    opened_at TEXT NOT NULL,
-                    closed_at TEXT,
-                    close_price REAL,
-                    pips REAL,
-                    status TEXT DEFAULT 'OPEN',
-                    FOREIGN KEY (signal_id) REFERENCES signals(id)
-                )
-            ''')
-            
             # === INDEXES for Performance ===
             conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp 
@@ -88,10 +68,6 @@ class Database:
             conn.execute('''
                 CREATE INDEX IF NOT EXISTS idx_signals_timestamp 
                 ON signals(timestamp DESC)
-            ''')
-            conn.execute('''
-                CREATE INDEX IF NOT EXISTS idx_positions_symbol_status 
-                ON positions(symbol, status)
             ''')
             
             logger.info("✅ Database initialized successfully")
@@ -144,62 +120,6 @@ class Database:
                 WHERE id = ?
             ''', (status, mt5_ticket, error_message, signal_id))
     
-    def get_signal_by_message_id(self, message_id: int) -> Optional[Dict]:
-        """
-        Lookup signal by Telegram message ID for position modification.
-        
-        Args:
-            message_id: Telegram message ID
-            
-        Returns:
-            Dict with ticket_id, symbol, action, stop_loss, take_profit or None
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute('''
-                SELECT mt5_ticket, symbol, action, stop_loss, take_profit
-                FROM signals 
-                WHERE message_id = ?
-            ''', (message_id,))
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'ticket_id': row[0],
-                    'symbol': row[1],
-                    'action': row[2],
-                    'stop_loss': row[3],
-                    'take_profit': row[4]
-                }
-            return None
-    
-    def get_signal_by_telegram_msg_id(self, telegram_msg_id: int) -> Optional[Dict]:
-        """
-        Lookup signal by Telegram message ID for position modification.
-        Uses JOIN to bridge telegram_msg_id → database message_id → signal.
-        
-        Args:
-            telegram_msg_id: Telegram's internal message ID (from reply_to_msg_id)
-            
-        Returns:
-            Dict with ticket_id, symbol, action, stop_loss, take_profit or None
-        """
-        with self.get_connection() as conn:
-            cursor = conn.execute('''
-                SELECT s.mt5_ticket, s.symbol, s.action, s.stop_loss, s.take_profit
-                FROM signals s
-                JOIN messages m ON s.message_id = m.id
-                WHERE m.telegram_msg_id = ?
-            ''', (telegram_msg_id,))
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'ticket_id': row[0],
-                    'symbol': row[1],
-                    'action': row[2],
-                    'stop_loss': row[3],
-                    'take_profit': row[4]
-                }
-            return None
-    
     def get_pending_entry_by_telegram_msg_id(self, telegram_msg_id: int) -> Optional[Dict]:
         """
         Get pending entry signal by Telegram message ID.
@@ -228,51 +148,6 @@ class Database:
                 }
             return None
     
-    def update_signal_sltp(self, message_id: int, stop_loss: Optional[float], 
-                           take_profit: Optional[float]) -> bool:
-        """
-        Update SL/TP after position modification.
-        
-        Args:
-            message_id: Telegram message ID
-            stop_loss: New stop loss value
-            take_profit: New take profit value
-            
-        Returns:
-            True if successful
-        """
-        with self.get_connection() as conn:
-            conn.execute('''
-                UPDATE signals 
-                SET stop_loss = ?, take_profit = ?, status = 'MODIFIED'
-                WHERE message_id = ?
-            ''', (stop_loss, take_profit, message_id))
-            return True
-    
-    def update_signal_sltp_by_telegram_id(self, telegram_msg_id: int, 
-                                           stop_loss: Optional[float], 
-                                           take_profit: Optional[float]) -> bool:
-        """
-        Update SL/TP after position modification using Telegram message ID.
-        
-        Args:
-            telegram_msg_id: Telegram's internal message ID
-            stop_loss: New stop loss value
-            take_profit: New take profit value
-            
-        Returns:
-            True if successful
-        """
-        with self.get_connection() as conn:
-            conn.execute('''
-                UPDATE signals 
-                SET stop_loss = ?, take_profit = ?, status = 'MODIFIED'
-                WHERE message_id IN (
-                    SELECT id FROM messages WHERE telegram_msg_id = ?
-                )
-            ''', (stop_loss, take_profit, telegram_msg_id))
-            return True
-    
     def update_signal_sltp_by_id(self, signal_id: int,
                                   stop_loss: float, take_profit: float) -> bool:
         """
@@ -294,30 +169,6 @@ class Database:
             ''', (stop_loss, take_profit, signal_id))
             return True
     
-    # === POSITION OPERATIONS ===
-    
-    def store_position(self, signal_id: int, symbol: str, mt5_ticket: int,
-                       action: str, open_price: float, lot_size: float) -> int:
-        """Store new open position"""
-        with self.get_connection() as conn:
-            cursor = conn.execute('''
-                INSERT INTO positions (signal_id, symbol, mt5_ticket, action, 
-                                       open_price, lot_size, opened_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
-            ''', (signal_id, symbol, mt5_ticket, action, open_price, lot_size,
-                  datetime.now().isoformat()))
-            return cursor.lastrowid
-    
-    def get_open_positions(self, symbol: str) -> list:
-        """Get all open positions for a symbol"""
-        with self.get_connection() as conn:
-            cursor = conn.execute('''
-                SELECT * FROM positions
-                WHERE symbol = ? AND status = 'OPEN'
-                ORDER BY opened_at DESC
-            ''', (symbol,))
-            return [dict(row) for row in cursor.fetchall()]
-    
     # === STATISTICS ===
     
     def get_stats(self) -> Dict[str, Any]:
@@ -338,15 +189,9 @@ class Database:
                 "SELECT COUNT(*) FROM signals WHERE status = 'ERROR'"
             ).fetchone()[0]
             
-            # Open positions
-            open_positions = conn.execute(
-                "SELECT COUNT(*) FROM positions WHERE status = 'OPEN'"
-            ).fetchone()[0]
-            
             return {
                 'total_signals': total_signals,
                 'successful_trades': successful,
-                'failed_trades': failed,
-                'open_positions': open_positions
+                'failed_trades': failed
             }
 
