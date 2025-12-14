@@ -213,23 +213,29 @@ class SignalParser:
         - "take profit: 2700" / "Take Profit: 2700"
         - "SL 4014.427" (space only)
         - "TP 80000" (space only)
+        - "SL - 4,232.37" (comma thousand separator)
+        - "TP - 4,205.58" (comma thousand separator)
         """
         text_upper = text.upper()
-        
+
         # Build pattern based on price type
+        # Pattern captures: digits with optional commas, optional decimal part
+        # Examples: "4232.37", "4,232.37", "80000", "80,000"
         if price_type.upper() == 'TP':
             # Match: TP, tp, take profit, Take Profit, TAKE PROFIT
-            pattern = r'(?:TP|TAKE\s*PROFIT)\s*[:\s–-]*\s*([\d]+(?:\.[\d]+)?)'
+            pattern = r'(?:TP|TAKE\s*PROFIT)\s*[:\s–-]*\s*([\d,]+(?:\.[\d]+)?)'
         elif price_type.upper() == 'SL':
             # Match: SL, sl, stop loss, Stop Loss, STOP LOSS
-            pattern = r'(?:SL|STOP\s*LOSS)\s*[:\s–-]*\s*([\d]+(?:\.[\d]+)?)'
+            pattern = r'(?:SL|STOP\s*LOSS)\s*[:\s–-]*\s*([\d,]+(?:\.[\d]+)?)'
         else:
             return None
 
         match = re.search(pattern, text_upper, re.IGNORECASE)
         if match:
             try:
-                return float(match.group(1))
+                # Remove commas before converting to float (handles "4,232.37" → "4232.37")
+                price_str = match.group(1).replace(',', '')
+                return float(price_str)
             except ValueError:
                 logger.warning(f"Failed to convert '{match.group(1)}' to float for {price_type}")
                 return None
@@ -338,7 +344,28 @@ Take Profit:4030.353"""),
         ("ALIAS #2", "SELL SILVER NOW"),
         ("ALIAS #3", "BUY BITCOIN SL 80000 TP 95000"),
         ("ALIAS #4", "SELL CABLE SL 1.25 TP 1.22"),  # GBPUSD nickname
-        
+
+        # === COMMA-SEPARATED PRICES (Cobalt SMC format) ===
+        ("COMMA #1", """Cobalt SMC
+SELL GOLD NOW
+
+SL - 4,232.37
+TP - 4,205.58"""),
+
+        ("COMMA #2", """BUY GOLD NOW
+SL - 3,986.50
+TP - 4,050.00"""),
+
+        ("COMMA #3", "SL - 80,000.50\nTP - 95,000.75"),  # PARAMS_ONLY with commas
+
+        ("COMMA #4", """Buy XAUUSD now
+Stop loss: 4,123.060
+Take profit: 4,200.500"""),
+
+        # Edge cases: mixed formats (comma and non-comma)
+        ("MIXED #1", "SL 4232.37 TP 4,205.58"),  # One with comma, one without
+        ("MIXED #2", "SL - 4,232 TP - 4205"),    # Integer with comma vs without
+
         # Non-signals (should return None)
         ("NON-SIGNAL #1", "I need to teach you guys this my new strategy, it's too good !"),
         ("NON-SIGNAL #2", "That's what I went to learn when i traveled out !"),
