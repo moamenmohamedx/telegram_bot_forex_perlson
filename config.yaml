@@ -31,8 +31,6 @@ mt5_path: "C:/Program Files/MetaTrader 5/terminal64.exe"
 # Lot size for each trade (0.01 = micro lot)
 lot_size: 0.01
 
-# Maximum slippage allowed (in points)
-max_slippage: 10
 
 # Magic number to identify bot trades in MT5
 magic_number: 234567

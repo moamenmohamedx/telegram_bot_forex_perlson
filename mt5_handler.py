@@ -21,6 +21,7 @@ class MT5Handler:
     def __init__(self):
         self.executor = ThreadPoolExecutor(max_workers=3)
         self.initialized = False
+        self._symbol_cache = {}  # Cache for validated symbols
     
     # === INITIALIZATION ===
     
@@ -74,6 +75,59 @@ class MT5Handler:
         """Shutdown MT5 (async)"""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self.executor, self._shutdown_sync)
+    
+    # === SYMBOL VALIDATION ===
+    
+    def _validate_symbol_sync(self, symbol: str) -> Dict[str, Any]:
+        """
+        Validate symbol exists on broker (sync).
+        
+        Returns:
+            dict with 'valid' bool, 'symbol' str, 'error' str, 'digits' int
+        """
+        try:
+            # Check cache first
+            if symbol in self._symbol_cache:
+                return self._symbol_cache[symbol]
+            
+            # Query MT5 for symbol info
+            info = mt5.symbol_info(symbol)
+            
+            if info is None:
+                result = {'valid': False, 'error': f'Symbol {symbol} not found on broker'}
+            elif not info.visible:
+                # Try to make symbol visible in MarketWatch
+                if not mt5.symbol_select(symbol, True):
+                    result = {'valid': False, 'error': f'Symbol {symbol} not available for trading'}
+                else:
+                    result = {'valid': True, 'symbol': symbol, 'digits': info.digits}
+            else:
+                result = {'valid': True, 'symbol': symbol, 'digits': info.digits}
+            
+            # Cache result for performance
+            self._symbol_cache[symbol] = result
+            return result
+            
+        except Exception as e:
+            return {'valid': False, 'error': f'Validation error: {str(e)}'}
+    
+    async def validate_symbol(self, symbol: str) -> Dict[str, Any]:
+        """
+        Validate symbol (async wrapper).
+        
+        Args:
+            symbol: MT5 symbol to validate (e.g., XAUUSD, EURUSD)
+            
+        Returns:
+            dict with 'valid' bool, 'symbol' str, 'error' str (if invalid)
+        """
+        if not self.initialized:
+            # Fallback: accept pattern-matched symbols when MT5 offline
+            logger.debug(f"MT5 not initialized - accepting symbol {symbol} (will validate at execution)")
+            return {'valid': True, 'symbol': symbol, 'offline_mode': True}
+        
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.executor, self._validate_symbol_sync, symbol)
     
     # === ORDER EXECUTION ===
     

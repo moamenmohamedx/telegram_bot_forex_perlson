@@ -46,12 +46,8 @@ class SignalParser:
     """Parser for Mrbluemax Forex Academy trading signals"""
     
     def __init__(self):
-        # Valid forex symbols (add more as needed)
-        self.valid_symbols = {
-            'XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 
-            'USDCAD', 'NZDUSD', 'USDCHF', 'GBPJPY', 'EURJPY',
-            'XAGUSD', 'BTCUSD', 'ETHUSD'
-        }
+        # No hardcoded symbols needed - SymbolResolver handles all symbol detection
+        pass
     
     def parse(self, message_text: str) -> Optional[Signal]:
         """
@@ -177,30 +173,21 @@ class SignalParser:
     
     def _extract_symbol(self, text: str) -> Optional[str]:
         """
-        Extract symbol using multi-strategy approach.
+        Extract symbol using SymbolResolver.
         
-        Strategy 1: Direct 6-7 char symbol match (XAUUSD, BTCUSD)
-        Strategy 2: Alias resolution (GOLD → XAUUSD)
+        Handles:
+        - Aliases (GOLD → XAUUSD, BTC → BTCUSD)
+        - Direct symbols (EURUSD, XAUUSD, US30)
+        - Amplified indices (US30_x10, USTEC_x100)
         
         Returns:
             Official MT5 symbol or None
         """
-        # Strategy 1: Try alias resolution FIRST (more comprehensive)
-        alias_symbol = SymbolResolver.resolve(text)
-        if alias_symbol:
-            logger.info(f"🔍 Resolved alias to: {alias_symbol}")
-            return alias_symbol
-        
-        # Strategy 2: Direct symbol match fallback (for symbols not in alias map)
-        symbol_pattern = r'\b([A-Z]{6,7})\b'
-        matches = re.findall(symbol_pattern, text)
-        
-        for match in matches:
-            # Validate against known symbols
-            if match in self.valid_symbols:
-                return match
-        
-        return None
+        # Single source of truth for symbol resolution
+        symbol = SymbolResolver.resolve(text)
+        if symbol:
+            logger.info(f"🔍 Resolved symbol: {symbol}")
+        return symbol
     
     def _extract_price(self, text: str, price_type: str) -> Optional[float]:
         """
@@ -251,28 +238,33 @@ class SignalParser:
         - Traditional signals (action + symbol + SL/TP)
         - Entry-only signals (action + symbol/alias)
         - Params-only signals (just SL/TP)
+        - All symbol types (forex, metals, crypto, indices, energies)
         """
         if not message_text:
             return False
         
-        text_upper = message_text.upper()
+        # Normalize text first (same as parse() does)
+        # This converts STOPLOSS→SL, TAKEPROFIT→TP, etc.
+        text_normalized = self._normalize_text(message_text)
         
         # Check for action keywords (BUY, SELL)
-        has_action = any(word in text_upper for word in ['BUY', 'SELL'])
+        has_action = any(word in text_normalized for word in ['BUY', 'SELL'])
         
-        # Check for symbol-like pattern (6-7 uppercase letters)
-        has_symbol = bool(re.search(r'[A-Z]{6,7}', text_upper))
+        # Check for symbol-like pattern (2-10 uppercase letters, optional _xN suffix)
+        has_symbol = bool(re.search(r'[A-Z]{2,10}(?:_x\d+)?', text_normalized))
         
-        # Check for symbol aliases (GOLD, BTC, SILVER, etc.)
-        has_alias = any(alias in text_upper for alias in [
-            'GOLD', 'SILVER', 'BITCOIN', 'BTC', 'ETH', 'ETHEREUM',
-            'EUR', 'GBP', 'CABLE', 'AUSSIE', 'LOONIE', 'OIL'
+        # Check for common symbol aliases (expanded list)
+        has_alias = any(alias in text_normalized for alias in [
+            'GOLD', 'SILVER', 'PLATINUM', 'PALLADIUM', 'COPPER', 'ALUMINUM',
+            'BITCOIN', 'BTC', 'ETH', 'ETHEREUM', 'LITECOIN', 'RIPPLE', 'CARDANO', 'SOLANA',
+            'EUR', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF',
+            'CABLE', 'FIBER', 'AUSSIE', 'KIWI', 'LOONIE', 'SWISSIE', 'GOPHER',
+            'OIL', 'CRUDE', 'BRENT', 'GAS', 'NATGAS',
+            'DOW', 'NASDAQ', 'SPX', 'FTSE', 'DAX', 'NIKKEI'
         ])
         
-        # Check for TP/SL keywords (for PARAMS_ONLY signals)
-        has_params = any(keyword in text_upper for keyword in [
-            'TP', 'SL', 'TAKE PROFIT', 'STOP LOSS'
-        ])
+        # Check for TP/SL keywords (now simplified - normalization already converted variants)
+        has_params = 'TP' in text_normalized or 'SL' in text_normalized
         
         # Signal is valid if:
         # 1. Has action + (symbol OR alias), OR
@@ -331,6 +323,12 @@ Take Profit:4030.353"""),
         ("PARAMS_ONLY #3", "take profit: 2700\nstop loss: 2650"),
         ("PARAMS_ONLY #4", "TP – 4055.964\nSL – 4014.427"),
         
+        # Edge case: PARAMS_ONLY with no spaces (the bug we're fixing)
+        ("PARAMS_NOSPACE #1", "stoploss 80000 takeprofit 95000"),
+        ("PARAMS_NOSPACE #2", "STOPLOSS 2650 TAKEPROFIT 2700"),
+        ("PARAMS_HYPHEN #1", "stop-loss 80000 take-profit 95000"),
+        ("PARAMS_MIXED #1", "StopLoss: 80000\nTakeProfit: 95000"),
+        
         # TP/SL format variations
         ("TP_FORMAT #1", "tp: 2700"),
         ("TP_FORMAT #2", "take profit - 2700"),
@@ -344,6 +342,31 @@ Take Profit:4030.353"""),
         ("ALIAS #2", "SELL SILVER NOW"),
         ("ALIAS #3", "BUY BITCOIN SL 80000 TP 95000"),
         ("ALIAS #4", "SELL CABLE SL 1.25 TP 1.22"),  # GBPUSD nickname
+        ("ALIAS #5", "BUY FIBER SL 1.05 TP 1.10"),  # EURUSD nickname
+        ("ALIAS #6", "SELL AUSSIE NOW"),  # AUDUSD nickname
+        ("ALIAS #7", "BUY COPPER SL 4.50 TP 4.80"),  # Industrial metal
+        
+        # === NEW: Forex Exotics ===
+        ("EXOTIC #1", "BUY USDTRY SL 32.5 TP 33.0"),
+        ("EXOTIC #2", "SELL EURZAR SL 20.5 TP 19.8"),
+        ("EXOTIC #3", "BUY USDMXN NOW"),
+        
+        # === NEW: Indices ===
+        ("INDEX #1", "BUY US30 SL 40000 TP 42000"),
+        ("INDEX #2", "SELL USTEC SL 16000 TP 15500"),
+        ("INDEX #3", "BUY UK100 SL 7500 TP 7700"),
+        ("INDEX #4", "SELL DE30 NOW"),
+        ("INDEX #5", "BUY JP225 SL 33000 TP 34000"),
+        
+        # === NEW: Amplified Indices ===
+        ("AMPLIFIED #1", "BUY US30_x10 SL 400000 TP 420000"),
+        ("AMPLIFIED #2", "SELL USTEC_x100 NOW"),
+        ("AMPLIFIED #3", "BUY US500_x100 SL 450000 TP 460000"),
+        
+        # === NEW: Energies ===
+        ("ENERGY #1", "BUY OIL SL 70 TP 75"),
+        ("ENERGY #2", "SELL BRENT SL 75 TP 72"),
+        ("ENERGY #3", "BUY NATGAS SL 3.5 TP 4.0"),
 
         # === COMMA-SEPARATED PRICES (Cobalt SMC format) ===
         ("COMMA #1", """Cobalt SMC

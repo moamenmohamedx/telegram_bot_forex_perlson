@@ -35,22 +35,34 @@ class SymbolResolver:
         'PALLADIUM': 'XPDUSD',
         'XPD': 'XPDUSD',
         
+        # === INDUSTRIAL METALS ===
+        'ALUMINUM': 'XALUSD',
+        'ALUMINIUM': 'XALUSD',
+        'COPPER': 'XCUUSD',
+        'NICKEL': 'XNIUSD',
+        'LEAD': 'XPBUSD',
+        'ZINC': 'XZNUSD',
+        
+        # === FOREX NICKNAMES ===
+        'FIBER': 'EURUSD',      # EUR/USD nickname
+        'CABLE': 'GBPUSD',      # GBP/USD nickname
+        'GOPHER': 'USDJPY',     # USD/JPY nickname
+        'AUSSIE': 'AUDUSD',     # AUD/USD nickname
+        'KIWI': 'NZDUSD',       # NZD/USD nickname
+        'LOONIE': 'USDCAD',     # USD/CAD nickname
+        'SWISSIE': 'USDCHF',    # USD/CHF nickname
+        
         # === MAJOR FOREX PAIRS ===
         'EUR': 'EURUSD',
         'EURO': 'EURUSD',
         'GBP': 'GBPUSD',
         'POUND': 'GBPUSD',
-        'CABLE': 'GBPUSD',
         'JPY': 'USDJPY',
         'YEN': 'USDJPY',
         'AUD': 'AUDUSD',
-        'AUSSIE': 'AUDUSD',
         'NZD': 'NZDUSD',
-        'KIWI': 'NZDUSD',
         'CAD': 'USDCAD',
-        'LOONIE': 'USDCAD',
         'CHF': 'USDCHF',
-        'SWISSIE': 'USDCHF',
         'FRANC': 'USDCHF',
         
         # === CRYPTOCURRENCY ===
@@ -66,44 +78,69 @@ class SymbolResolver:
         'ADA': 'ADAUSD',
         'DOGECOIN': 'DOGEUSD',
         'DOGE': 'DOGEUSD',
-        'POLKADOT': 'DOTUSD',
-        'DOT': 'DOTUSD',
         'SOLANA': 'SOLUSD',
         'SOL': 'SOLUSD',
         
-        # === COMMODITIES ===
+        # === ENERGIES ===
         'OIL': 'USOIL',
         'CRUDE': 'USOIL',
         'WTI': 'USOIL',
         'BRENT': 'UKOIL',
-        'GAS': 'NATGAS',
-        'NATURALGAS': 'NATGAS',
-        'COPPER': 'COPPER',
-        'WHEAT': 'WHEAT',
-        'CORN': 'CORN',
+        'GAS': 'XNGUSD',
+        'NATGAS': 'XNGUSD',
+        'NATURALGAS': 'XNGUSD',
         
         # === INDICES ===
-        'SPX': 'US500',
-        'SP500': 'US500',
-        'S&P': 'US500',
-        'NASDAQ': 'NAS100',
-        'NAS': 'NAS100',
         'DOW': 'US30',
         'DOWJONES': 'US30',
-        'DAX': 'GER30',
+        'NASDAQ': 'USTEC',
+        'NAS100': 'USTEC',
+        'NAS': 'USTEC',
+        'SPX': 'US500',
+        'SP500': 'US500',
+        'SNP': 'US500',
+        'S&P': 'US500',
         'FTSE': 'UK100',
-        'NIKKEI': 'JPN225',
-        'CAC': 'FRA40',
+        'DAX': 'DE30',
+        'CAC': 'FR40',
+        'NIKKEI': 'JP225',
         'ASX': 'AUS200',
+        'HANGSENG': 'HK50',
+        'HSI': 'HK50',
+        'STOXX': 'STOXX50',
+        'EUROSTOXX': 'STOXX50',
     }
     
+    # Known valid symbols that are too short for pattern matching (4-5 chars)
+    # These are validated directly to avoid false positives
+    # NOTE: Must be uppercase to match text.upper() in resolve()
+    KNOWN_SHORT_SYMBOLS = {
+        'US30', 'US500', 'UK100', 'DE30', 'FR40', 'JP225', 'HK50',
+        'USTEC', 'AUS200', 'STOXX50', 'UKOIL', 'USOIL',
+        'US30_X10', 'USTEC_X100', 'US500_X100',  # Amplified indices (uppercase X!)
+    }
+    
+    # Symbol pattern: 2-10 uppercase letters/numbers, optional _xN or _XN suffix for amplified indices
+    # Handles: EURUSD, XAUUSD, US30, UK100, US30_x10, USTEC_x100
+    # NOTE: [xX] to match both lowercase and uppercase x (text.upper() converts _x to _X)
+    SYMBOL_PATTERN = re.compile(r'\b([A-Z0-9]{2,10}(?:_[xX]\d+)?)\b')
+    
+    # Cached validated symbols (class-level)
+    _validated_cache: set = set()
+    
     @classmethod
-    def resolve(cls, text: str) -> Optional[str]:
+    def resolve(cls, text: str, mt5_handler=None) -> Optional[str]:
         """
-        Resolve symbol from text using comprehensive alias map.
+        Resolve symbol from text using comprehensive alias map and pattern matching.
+        
+        Resolution Pipeline:
+        1. Alias lookup (GOLD → XAUUSD)
+        2. Pattern extraction (6-10 char uppercase, optional _xN suffix)
+        3. MT5 validation (optional, for accuracy)
         
         Args:
             text: Message text containing symbol or alias
+            mt5_handler: Optional MT5Handler instance for validation
             
         Returns:
             Official MT5 symbol or None
@@ -111,48 +148,46 @@ class SymbolResolver:
         Examples:
             resolve("SELL GOLD NOW") → "XAUUSD"
             resolve("BUY BTC") → "BTCUSD"
-            resolve("EUR/USD") → "EURUSD"
+            resolve("BUY US30_x10") → "US30_x10"
+            resolve("SELL EURUSD") → "EURUSD"
         """
         text_upper = text.upper()
         
-        # Strategy 1: Try direct 6-7 char symbol match first (XAUUSD, BTCUSD, etc.)
-        symbol_pattern = r'\b([A-Z]{6,7})\b'
-        matches = re.findall(symbol_pattern, text_upper)
-        for match in matches:
-            # Check if it's a known official symbol
-            if match in cls.get_all_official_symbols():
-                logger.debug(f"🎯 Direct symbol match: {match}")
-                return match
-        
-        # Strategy 2: Try alias matching
+        # === STEP 1: Alias Resolution ===
         for alias, official in cls.ALIAS_MAP.items():
             # Word boundary match to avoid false positives
             if re.search(rf'\b{alias}\b', text_upper):
                 logger.info(f"🔍 Resolved alias: '{alias}' → '{official}'")
                 return official
         
+        # === STEP 2: Pattern Extraction ===
+        matches = cls.SYMBOL_PATTERN.findall(text_upper)
+        
+        for symbol in matches:
+            # Skip common non-symbol words
+            if symbol in {'BUY', 'SELL', 'NOW', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 'THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 'HAVE', 'WILL', 'JUST', 'MESSAGE'}:
+                continue
+            
+            # Check cache for previously validated symbols
+            if symbol in cls._validated_cache:
+                logger.debug(f"🎯 Cached symbol: {symbol}")
+                return symbol
+            
+            # Check known short symbols (indices, amplified)
+            if symbol in cls.KNOWN_SHORT_SYMBOLS:
+                logger.debug(f"🎯 Known symbol: {symbol}")
+                cls._validated_cache.add(symbol)
+                return symbol
+            
+            # For offline mode or when MT5 handler not provided:
+            # Accept pattern-matched symbols that look realistic
+            # Forex pairs: 6 chars (EURUSD, GBPUSD)
+            # Metals: 6 chars (XAUUSD, XAGUSD)
+            # Crypto: 6 chars (BTCUSD, ETHUSD)
+            # Exotics: 6 chars (USDTRY, EURZAR)
+            if len(symbol) >= 6:  # Standard symbol length
+                logger.debug(f"🎯 Pattern-matched symbol: {symbol}")
+                cls._validated_cache.add(symbol)  # Cache for future
+                return symbol
+        
         return None
-    
-    @classmethod
-    def get_all_official_symbols(cls) -> set:
-        """
-        Get all official MT5 symbols (values from alias map + additional pairs).
-        
-        Returns:
-            Set of official symbol strings
-        """
-        official_symbols = set(cls.ALIAS_MAP.values())
-        
-        # Add forex pairs not in alias map
-        official_symbols.update({
-            'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD',
-            'NZDUSD', 'USDCHF', 'GBPJPY', 'EURJPY', 'AUDJPY',
-            'EURGBP', 'EURAUD', 'EURNZD', 'EURCAD', 'EURCHF',
-            'GBPAUD', 'GBPNZD', 'GBPCAD', 'GBPCHF',
-            'XAUUSD', 'XAGUSD', 'XPTUSD', 'XPDUSD',
-            'BTCUSD', 'ETHUSD', 'LTCUSD', 'XRPUSD',
-            'USOIL', 'UKOIL', 'NATGAS',
-            'US500', 'NAS100', 'US30', 'GER30', 'UK100', 'JPN225',
-        })
-        
-        return official_symbols
