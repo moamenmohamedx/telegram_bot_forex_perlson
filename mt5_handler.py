@@ -76,6 +76,37 @@ class MT5Handler:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self.executor, self._shutdown_sync)
     
+    # === CONNECTION HEALTH CHECK ===
+    
+    def _check_connection_health(self) -> bool:
+        """
+        Verify MT5 connection is alive and functional.
+        
+        Checks:
+        1. account_info() returns data (proves we're logged in)
+        2. symbols_total() > 0 (proves symbols are loaded)
+        
+        Returns:
+            True if connection is healthy, False if dead/degraded
+        """
+        try:
+            account_info = mt5.account_info()
+            if account_info is None:
+                logger.warning("MT5 health check: account_info() returned None - connection lost")
+                return False
+            
+            symbols_count = mt5.symbols_total()
+            if symbols_count == 0:
+                logger.warning(f"MT5 health check: 0 symbols available - connection degraded")
+                return False
+            
+            logger.debug(f"MT5 health check: OK ({symbols_count} symbols, balance: {account_info.balance})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"MT5 health check failed with exception: {e}")
+            return False
+    
     # === SYMBOL VALIDATION ===
     
     def _validate_symbol_sync(self, symbol: str) -> Dict[str, Any]:
@@ -135,10 +166,22 @@ class MT5Handler:
                           sl: Optional[float], tp: Optional[float]) -> Dict[str, Any]:
         """Place market order (sync)"""
         try:
-            # Validate symbol
+            # === STEP 1: Verify MT5 connection is alive ===
+            if not self._check_connection_health():
+                logger.warning("MT5 connection dead - attempting reconnect...")
+                self.initialized = False
+                
+                if not self._initialize_sync():
+                    return {'success': False, 'error': 'MT5 connection lost and reconnect failed'}
+                
+                logger.info("MT5 reconnected successfully")
+            
+            # === STEP 2: Validate symbol ===
             symbol_info = mt5.symbol_info(symbol)
             if not symbol_info:
-                return {'success': False, 'error': f'Symbol {symbol} not found'}
+                # Provide more diagnostic info in error
+                symbols_count = mt5.symbols_total()
+                return {'success': False, 'error': f'Symbol {symbol} not found on broker ({symbols_count} symbols available)'}
             
             if not symbol_info.visible:
                 mt5.symbol_select(symbol, True)

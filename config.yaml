@@ -13,6 +13,8 @@
 
 channels:
   - -4977901972    # Main signal channel (supergroup format: -100 + channel_id)
+  - -1003436309150 
+  - -1002027660520
   
 
 # ------------------------------------------
