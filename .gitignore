@@ -5,7 +5,7 @@
 !.env.example
 !.env.template
 !env_template.txt
-
+config.yaml
 # Telegram Session Files
 *.session
 *.session-journal

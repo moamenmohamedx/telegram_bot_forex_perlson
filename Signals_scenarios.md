@@ -30,3 +30,11 @@ Cobalt do it in 2 messages :
 
 1. SELL GOLD NOW
 
+
+
+
+#3. Copy bot Puneet  (new group )
+
+1. Short market xau usd   Sl - 4462 Tp1 -4401 Tp2 -4243'
+2.XAGUSD LONG market Sl 75.4 : x Tp - 78.921
+3.XAUUSD Buy Limit 4477 , Sl 4473 , Tp 4519 

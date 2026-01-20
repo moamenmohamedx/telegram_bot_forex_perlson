@@ -71,6 +71,45 @@ class Database:
             ''')
             
             logger.info("✅ Database initialized successfully")
+            
+            # Run migrations
+            self._migrate_to_limit_orders(conn)
+    
+    def _migrate_to_limit_orders(self, conn) -> None:
+        """
+        Add order_type and entry_price columns to signals table for limit order support.
+        
+        PATTERN: From ai_docs/sqlite_migration_patterns.md
+        CRITICAL: Always check column existence before ALTER TABLE
+        """
+        try:
+            # Check existing columns using PRAGMA table_info
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info('signals')")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            # Add order_type column if missing (default 'MARKET' for existing records)
+            if 'order_type' not in columns:
+                conn.execute("""
+                    ALTER TABLE signals
+                    ADD COLUMN order_type TEXT DEFAULT 'MARKET'
+                """)
+                logger.info("✅ Added order_type column to signals table")
+            
+            # Add entry_price column if missing (NULL for market orders)
+            if 'entry_price' not in columns:
+                conn.execute("""
+                    ALTER TABLE signals
+                    ADD COLUMN entry_price REAL
+                """)
+                logger.info("✅ Added entry_price column to signals table")
+            
+            conn.commit()
+            
+        except Exception as e:
+            logger.error(f"❌ Migration to limit orders failed: {e}")
+            conn.rollback()
+            raise
     
     @contextmanager
     def get_connection(self):
@@ -100,13 +139,28 @@ class Database:
     # === SIGNAL OPERATIONS ===
     
     def store_signal(self, message_id: int, action: str, symbol: str, 
-                     sl: Optional[float] = None, tp: Optional[float] = None) -> int:
-        """Store parsed signal and return its ID"""
+                     sl: Optional[float] = None, tp: Optional[float] = None,
+                     order_type: str = "MARKET", entry_price: Optional[float] = None) -> int:
+        """
+        Store parsed signal and return its ID.
+        
+        Args:
+            message_id: Database message ID
+            action: BUY or SELL
+            symbol: Trading symbol (e.g., XAUUSD)
+            sl: Stop loss price (optional)
+            tp: Take profit price (optional)
+            order_type: "MARKET" or "LIMIT" (default: "MARKET")
+            entry_price: Entry price for LIMIT orders (optional)
+        
+        Returns:
+            Signal ID
+        """
         with self.get_connection() as conn:
             cursor = conn.execute('''
-                INSERT INTO signals (message_id, timestamp, action, symbol, stop_loss, take_profit)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (message_id, datetime.now().isoformat(), action, symbol, sl, tp))
+                INSERT INTO signals (message_id, timestamp, action, symbol, stop_loss, take_profit, order_type, entry_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (message_id, datetime.now().isoformat(), action, symbol, sl, tp, order_type, entry_price))
             return cursor.lastrowid
     
     def update_signal_status(self, signal_id: int, status: str, 

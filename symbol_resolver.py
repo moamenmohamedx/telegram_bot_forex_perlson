@@ -165,7 +165,9 @@ class SymbolResolver:
         
         for symbol in matches:
             # Skip common non-symbol words
-            if symbol in {'BUY', 'SELL', 'NOW', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 'THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 'HAVE', 'WILL', 'JUST', 'MESSAGE'}:
+            if symbol in {'BUY', 'SELL', 'LONG', 'SHORT', 'NOW', 'STOP', 'LOSS', 'TAKE', 'PROFIT', 
+                          'MARKET', 'LIMIT', 'THE', 'AND', 'FOR', 'WITH', 'FROM', 'THIS', 'THAT', 
+                          'HAVE', 'WILL', 'JUST', 'MESSAGE', 'ENTRY', 'PRICE', 'TARGET'}:
                 continue
             
             # Check cache for previously validated symbols

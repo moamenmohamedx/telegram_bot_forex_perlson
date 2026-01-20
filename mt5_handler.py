@@ -245,3 +245,214 @@ class MT5Handler:
         
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self.executor, self._place_order_sync, action, symbol, sl, tp)
+    
+    # === LIMIT ORDER EXECUTION ===
+    
+    def _validate_limit_order_sltp(self, symbol: str, action: str, entry_price: float,
+                                    sl: Optional[float], tp: Optional[float]) -> Dict[str, Any]:
+        """
+        Validate SL/TP positioning for limit orders.
+        
+        CRITICAL RULES from ai_docs/mt5_limit_orders_api.md:
+        - BUY LIMIT: SL < Entry < TP
+        - SELL LIMIT: TP < Entry < SL
+        - Stops must respect minimum distance from entry
+        
+        Args:
+            symbol: Trading symbol
+            action: BUY or SELL
+            entry_price: Limit order entry price
+            sl: Stop loss price
+            tp: Take profit price
+            
+        Returns:
+            dict with 'valid' bool and 'error' if invalid
+        """
+        try:
+            # Get symbol info for stops_level
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                return {'valid': False, 'error': f'Symbol {symbol} not found'}
+            
+            # Calculate minimum stop distance
+            # CRITICAL: Even if stops_level = 0, add buffer for safety
+            # NOTE: MT5 Python API uses 'trade_stops_level' not 'stops_level'
+            point = symbol_info.point
+            stops_level = symbol_info.trade_stops_level
+            min_distance = max(stops_level, 10) * point * 1.5  # 50% buffer
+            
+            if action == 'BUY':
+                # BUY LIMIT: SL < Entry < TP
+                if sl is not None:
+                    if sl >= entry_price:
+                        return {'valid': False, 'error': f'BUY LIMIT: SL ({sl}) must be < Entry ({entry_price})'}
+                    if abs(entry_price - sl) < min_distance:
+                        return {'valid': False, 'error': f'SL too close to entry (min distance: {min_distance / point:.0f} points)'}
+                
+                if tp is not None:
+                    if tp <= entry_price:
+                        return {'valid': False, 'error': f'BUY LIMIT: TP ({tp}) must be > Entry ({entry_price})'}
+                    if abs(tp - entry_price) < min_distance:
+                        return {'valid': False, 'error': f'TP too close to entry (min distance: {min_distance / point:.0f} points)'}
+            
+            elif action == 'SELL':
+                # SELL LIMIT: TP < Entry < SL
+                if sl is not None:
+                    if sl <= entry_price:
+                        return {'valid': False, 'error': f'SELL LIMIT: SL ({sl}) must be > Entry ({entry_price})'}
+                    if abs(sl - entry_price) < min_distance:
+                        return {'valid': False, 'error': f'SL too close to entry (min distance: {min_distance / point:.0f} points)'}
+                
+                if tp is not None:
+                    if tp >= entry_price:
+                        return {'valid': False, 'error': f'SELL LIMIT: TP ({tp}) must be < Entry ({entry_price})'}
+                    if abs(entry_price - tp) < min_distance:
+                        return {'valid': False, 'error': f'TP too close to entry (min distance: {min_distance / point:.0f} points)'}
+            
+            return {'valid': True}
+            
+        except Exception as e:
+            return {'valid': False, 'error': f'Validation error: {str(e)}'}
+    
+    def _place_limit_order_sync(self, action: str, symbol: str, volume: float,
+                                 entry_price: float, sl: Optional[float],
+                                 tp: Optional[float]) -> Dict[str, Any]:
+        """
+        Place LIMIT order on MT5 (sync).
+        
+        CRITICAL GOTCHAS from ai_docs/mt5_limit_orders_api.md:
+        - All prices MUST be float, not int
+        - BUY LIMIT: entry BELOW current Ask
+        - SELL LIMIT: entry ABOVE current Bid
+        - Use TRADE_ACTION_PENDING + ORDER_TIME_GTC
+        """
+        try:
+            # === STEP 1: Verify MT5 connection is alive ===
+            if not self._check_connection_health():
+                logger.warning("MT5 connection dead - attempting reconnect...")
+                self.initialized = False
+                
+                if not self._initialize_sync():
+                    return {'success': False, 'error': 'MT5 connection lost and reconnect failed'}
+                
+                logger.info("MT5 reconnected successfully")
+            
+            # === STEP 2: Validate symbol ===
+            symbol_info = mt5.symbol_info(symbol)
+            if not symbol_info:
+                symbols_count = mt5.symbols_total()
+                return {'success': False, 'error': f'Symbol {symbol} not found on broker ({symbols_count} symbols available)'}
+            
+            if not symbol_info.visible:
+                mt5.symbol_select(symbol, True)
+            
+            # === STEP 3: Validate SL/TP positioning ===
+            validation = self._validate_limit_order_sltp(symbol, action, entry_price, sl, tp)
+            if not validation['valid']:
+                return {'success': False, 'error': validation['error']}
+            
+            # === STEP 4: Determine order type constant ===
+            if action == 'BUY':
+                order_type = mt5.ORDER_TYPE_BUY_LIMIT
+            else:  # SELL
+                order_type = mt5.ORDER_TYPE_SELL_LIMIT
+            
+            # === STEP 5: Build request with all float values ===
+            # CRITICAL: All prices MUST be float for MT5
+            request = {
+                'action': mt5.TRADE_ACTION_PENDING,  # CRITICAL: Use PENDING for limit orders
+                'symbol': symbol,
+                'volume': float(volume),  # CRITICAL: Must be float
+                'type': order_type,
+                'price': float(entry_price),  # CRITICAL: Must be float
+                'sl': float(sl) if sl else 0.0,  # CRITICAL: Must be float
+                'tp': float(tp) if tp else 0.0,  # CRITICAL: Must be float
+                'deviation': config.MAX_SLIPPAGE,
+                'magic': config.MAGIC_NUMBER,
+                'comment': 'telegram_bot_limit',
+                'type_time': mt5.ORDER_TIME_GTC,  # CRITICAL: GTC for persistent orders
+                'type_filling': mt5.ORDER_FILLING_RETURN,
+            }
+            
+            # === STEP 6: Pre-validate with order_check ===
+            check_result = mt5.order_check(request)
+            if check_result is None:
+                return {'success': False, 'error': f'order_check failed: {mt5.last_error()}'}
+            
+            if check_result.retcode != 0:
+                logger.warning(f"Order check warning: {check_result.retcode} - {check_result.comment}")
+            
+            # === STEP 7: Send order ===
+            result = mt5.order_send(request)
+            
+            if not result:
+                return {'success': False, 'error': f'Send failed: {mt5.last_error()}'}
+            
+            # === STEP 8: Check success ===
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                errors = {
+                    10004: 'Requote', 10006: 'Rejected', 10016: 'Invalid SL/TP',
+                    10018: 'Market closed', 10019: 'No funds', 10027: 'Autotrading disabled'
+                }
+                return {'success': False, 'error': errors.get(result.retcode, result.comment)}
+            
+            # SUCCESS
+            return {
+                'success': True,
+                'ticket': result.order,
+                'price': float(entry_price),
+                'volume': result.volume,
+                'order_type': 'LIMIT'
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    async def place_limit_order(self, action: str, symbol: str,
+                                 entry_price: float, sl: Optional[float] = None,
+                                 tp: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Place limit order (async wrapper).
+        
+        Args:
+            action: BUY or SELL
+            symbol: Trading symbol
+            entry_price: Limit order entry price
+            sl: Stop loss price (optional)
+            tp: Take profit price (optional)
+            
+        Returns:
+            dict with 'success', 'ticket', 'price', 'volume', 'order_type'
+        """
+        if not self.initialized:
+            return {'success': False, 'error': 'MT5 not initialized'}
+        
+        logger.info(f"🔍 Validating LIMIT order: {action} {symbol} @ {entry_price}")
+        
+        # Pre-validate SL/TP before executor call
+        loop = asyncio.get_running_loop()
+        validation = await loop.run_in_executor(
+            self.executor,
+            self._validate_limit_order_sltp,
+            symbol, action, entry_price, sl, tp
+        )
+        
+        if not validation['valid']:
+            logger.error(f"❌ Limit order validation failed: {validation['error']}")
+            return {'success': False, 'error': validation['error']}
+        
+        logger.info(f"✅ SL/TP validation passed for {action} LIMIT")
+        
+        # Place the order
+        result = await loop.run_in_executor(
+            self.executor,
+            self._place_limit_order_sync,
+            action, symbol, config.LOT_SIZE, entry_price, sl, tp
+        )
+        
+        if result['success']:
+            logger.info(f"✅ Limit order placed: {action} {symbol} @ {entry_price} | Ticket: {result['ticket']}")
+        else:
+            logger.error(f"❌ Limit order failed: {result['error']}")
+        
+        return result

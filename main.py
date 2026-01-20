@@ -138,14 +138,18 @@ class TradingBot:
             # Route based on signal type
             if signal.signal_type == 'COMPLETE':
                 # Traditional single-message signal with SL/TP (backward compatible)
+                # Store with order_type and entry_price for limit orders
                 signal_id = self.db.store_signal(
                     message_id, signal.action, signal.symbol,
-                    signal.stop_loss, signal.take_profit
+                    signal.stop_loss, signal.take_profit,
+                    order_type=signal.order_type,
+                    entry_price=signal.entry_price
                 )
                 
                 # Execute trade if enabled and MT5 is ready
                 if not config.TRADING_ENABLED:
-                    logger.info("DRY-RUN mode - Trade not executed")
+                    order_type_label = f"{signal.order_type}" + (f" @ {signal.entry_price}" if signal.entry_price else "")
+                    logger.info(f"DRY-RUN mode - {signal.action} {signal.symbol} {order_type_label} not executed")
                     self.db.update_signal_status(signal_id, 'DRY-RUN')
                     return
                 
@@ -154,14 +158,21 @@ class TradingBot:
                     self.db.update_signal_status(signal_id, 'MT5_OFFLINE')
                     return
                 
-                await self._handle_trade_signal(signal, signal_id)
+                # Route to appropriate handler based on order type
+                if signal.order_type == 'LIMIT':
+                    await self._handle_limit_order(signal, signal_id)
+                else:
+                    await self._handle_trade_signal(signal, signal_id)
             
             elif signal.signal_type == 'ENTRY_ONLY':
-                # Entry signal without SL/TP - execute immediately, wait for params via reply
+                # Entry signal without SL/TP - store and wait for params via reply
                 if not config.TRADING_ENABLED:
-                    logger.info("DRY-RUN mode - Entry signal logged but not executed")
+                    order_type_label = f"{signal.order_type}" + (f" @ {signal.entry_price}" if signal.entry_price else "")
+                    logger.info(f"DRY-RUN mode - Entry signal {signal.action} {signal.symbol} {order_type_label} logged")
                     signal_id = self.db.store_signal(
-                        message_id, signal.action, signal.symbol, None, None
+                        message_id, signal.action, signal.symbol, None, None,
+                        order_type=signal.order_type,
+                        entry_price=signal.entry_price
                     )
                     self.db.update_signal_status(signal_id, 'DRY-RUN')
                     return
@@ -169,7 +180,9 @@ class TradingBot:
                 if not self.mt5.initialized:
                     logger.warning("MT5 not initialized - Entry signal not executed")
                     signal_id = self.db.store_signal(
-                        message_id, signal.action, signal.symbol, None, None
+                        message_id, signal.action, signal.symbol, None, None,
+                        order_type=signal.order_type,
+                        entry_price=signal.entry_price
                     )
                     self.db.update_signal_status(signal_id, 'MT5_OFFLINE')
                     return
@@ -201,8 +214,8 @@ class TradingBot:
             logger.error(f"Error: {e}", exc_info=True)
     
     async def _handle_trade_signal(self, signal, signal_id: int) -> None:
-        """Execute BUY or SELL trade"""
-        logger.info(f"Executing {signal.action} {signal.symbol}...")
+        """Execute BUY or SELL market trade"""
+        logger.info(f"Executing {signal.action} {signal.symbol} (MARKET)...")
         
         result = await self.mt5.place_order(
             action=signal.action,
@@ -212,25 +225,47 @@ class TradingBot:
         )
         
         if result['success']:
-            logger.info(f"SUCCESS - Ticket: {result['ticket']} @ {result['price']}")
+            logger.info(f"✅ MARKET order SUCCESS - Ticket: {result['ticket']} @ {result['price']}")
             self.db.update_signal_status(signal_id, 'SUCCESS', result['ticket'])
         else:
-            logger.error(f"FAILED - {result['error']}")
+            logger.error(f"❌ MARKET order FAILED - {result['error']}")
+            self.db.update_signal_status(signal_id, 'ERROR', error_message=result['error'])
+    
+    async def _handle_limit_order(self, signal, signal_id: int) -> None:
+        """Execute LIMIT order (pending order at specific price)"""
+        logger.info(f"Placing {signal.action} {signal.symbol} LIMIT @ {signal.entry_price}...")
+        
+        result = await self.mt5.place_limit_order(
+            action=signal.action,
+            symbol=signal.symbol,
+            entry_price=signal.entry_price,
+            sl=signal.stop_loss,
+            tp=signal.take_profit
+        )
+        
+        if result['success']:
+            logger.info(f"✅ LIMIT order placed - Ticket: {result['ticket']} @ {signal.entry_price}")
+            self.db.update_signal_status(signal_id, 'PENDING_LIMIT', result['ticket'])
+        else:
+            logger.error(f"❌ LIMIT order FAILED - {result['error']}")
             self.db.update_signal_status(signal_id, 'ERROR', error_message=result['error'])
     
     async def _handle_entry_signal(self, signal, message_id: int, event) -> None:
         """Store entry signal as pending, wait for TP/SL reply before execution"""
         # CRITICAL: NO mt5.place_order() here - just store pending
         
-        logger.info(f"📋 Entry signal queued: {signal.action} {signal.symbol} (waiting for TP/SL)")
+        order_type_label = f"{signal.order_type}" + (f" @ {signal.entry_price}" if signal.entry_price else "")
+        logger.info(f"📋 Entry signal queued: {signal.action} {signal.symbol} {order_type_label} (waiting for TP/SL)")
         
-        # Store signal with PENDING_ENTRY status
+        # Store signal with PENDING_ENTRY status (includes order_type and entry_price)
         signal_id = self.db.store_signal(
-            message_id, signal.action, signal.symbol, None, None
+            message_id, signal.action, signal.symbol, None, None,
+            order_type=signal.order_type,
+            entry_price=signal.entry_price
         )
         self.db.update_signal_status(signal_id, 'PENDING_ENTRY')
         
-        logger.info(f"📋 Stored pending entry #{signal_id}: {signal.action} {signal.symbol}")
+        logger.info(f"📋 Stored pending entry #{signal_id}: {signal.action} {signal.symbol} {order_type_label}")
         # No reply - monitoring privately
     
     async def _handle_params_reply(self, signal, event) -> None:

@@ -27,15 +27,45 @@ class Signal:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     
-    # NEW: Multi-message support fields
+    # NEW: Limit order support fields
+    order_type: Optional[str] = "MARKET"  # "MARKET" or "LIMIT"
+    entry_price: Optional[float] = None   # Required for LIMIT orders
+    
+    # Multi-message support fields
     is_complete: bool = False          # True if has action+symbol+SL/TP
     signal_type: str = 'UNKNOWN'       # COMPLETE, ENTRY_ONLY, PARAMS_ONLY, INVALID
+    
+    def __post_init__(self):
+        """Validate signal data after initialization."""
+        # Validate limit order requirements
+        if self.order_type == "LIMIT" and self.entry_price is None:
+            raise ValueError("LIMIT order requires entry_price")
+        
+        # Validate SL/TP positioning for limit orders
+        if self.order_type == "LIMIT" and self.entry_price is not None:
+            if self.action == "BUY":
+                # BUY LIMIT: SL < Entry < TP
+                if self.stop_loss is not None and self.stop_loss >= self.entry_price:
+                    raise ValueError(f"BUY LIMIT: SL ({self.stop_loss}) must be < Entry ({self.entry_price})")
+                if self.take_profit is not None and self.take_profit <= self.entry_price:
+                    raise ValueError(f"BUY LIMIT: TP ({self.take_profit}) must be > Entry ({self.entry_price})")
+            
+            elif self.action == "SELL":
+                # SELL LIMIT: TP < Entry < SL
+                if self.stop_loss is not None and self.stop_loss <= self.entry_price:
+                    raise ValueError(f"SELL LIMIT: SL ({self.stop_loss}) must be > Entry ({self.entry_price})")
+                if self.take_profit is not None and self.take_profit >= self.entry_price:
+                    raise ValueError(f"SELL LIMIT: TP ({self.take_profit}) must be < Entry ({self.entry_price})")
     
     def __str__(self) -> str:
         """Human-readable representation"""
         if self.signal_type == 'COMPLETE':
+            if self.order_type == "LIMIT":
+                return f"{self.action} {self.symbol} LIMIT @ {self.entry_price} | SL: {self.stop_loss} | TP: {self.take_profit}"
             return f"{self.action} {self.symbol} | SL: {self.stop_loss} | TP: {self.take_profit}"
         elif self.signal_type == 'ENTRY_ONLY':
+            if self.order_type == "LIMIT":
+                return f"{self.action} {self.symbol} LIMIT @ {self.entry_price} (no SL/TP)"
             return f"{self.action} {self.symbol} (no SL/TP)"
         elif self.signal_type == 'PARAMS_ONLY':
             return f"SL: {self.stop_loss} | TP: {self.take_profit}"
@@ -62,13 +92,25 @@ class SignalParser:
             # === STEP 1: Clean and normalize text ===
             text = self._normalize_text(message_text)
             
-            # === STEP 2: Detect action type (BUY/SELL) ===
+            # === STEP 2: Detect action type (BUY/SELL/LONG/SHORT) ===
             action = self._extract_action(text)
             
             # === STEP 3: Extract symbol ===
             symbol = self._extract_symbol(text)
             
-            # === STEP 4: Extract Stop Loss and Take Profit ===
+            # === STEP 4: Detect order type (MARKET/LIMIT) ===
+            order_type = self._extract_order_type(text)
+            
+            # === STEP 5: Extract entry price (for LIMIT orders) ===
+            entry_price = self._extract_entry_price(text)
+            
+            # If entry price found but order_type is MARKET, switch to LIMIT
+            if entry_price is not None and order_type == 'MARKET':
+                # Check if there's an explicit MARKET keyword
+                if 'MARKET' not in text and 'NOW' not in text:
+                    order_type = 'LIMIT'
+            
+            # === STEP 6: Extract Stop Loss and Take Profit ===
             stop_loss = self._extract_price(text, 'SL')
             take_profit = self._extract_price(text, 'TP')
             
@@ -76,18 +118,25 @@ class SignalParser:
             if action and symbol and not stop_loss and not take_profit:
                 logger.warning(f"No stop loss found for {action} {symbol}")
             
-            # === STEP 5: Create signal object ===
-            signal = Signal(
-                action=action,
-                symbol=symbol,
-                stop_loss=stop_loss,
-                take_profit=take_profit
-            )
+            # === STEP 7: Create signal object ===
+            try:
+                signal = Signal(
+                    action=action,
+                    symbol=symbol,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    order_type=order_type,
+                    entry_price=entry_price
+                )
+            except ValueError as e:
+                # Validation error from __post_init__ (e.g., invalid SL/TP for LIMIT)
+                logger.warning(f"⚠️ Signal validation failed: {e}")
+                return None
             
-            # === STEP 6: Classify signal completeness ===
+            # === STEP 8: Classify signal completeness ===
             signal.signal_type = self.classify_signal(signal)
             
-            # === STEP 7: Validate and return ===
+            # === STEP 9: Validate and return ===
             if signal.signal_type == 'INVALID':
                 logger.debug(f"Invalid signal - missing critical fields")
                 return None
@@ -139,6 +188,20 @@ class SignalParser:
         # Convert to uppercase for consistent matching
         normalized = text.upper()
         
+        # Normalize spaced symbols: "xau usd" → "XAUUSD", "EUR USD" → "EURUSD"
+        # Use specific patterns to avoid matching BUY/SELL with currency codes
+        # Metals: XAU USD, XAG USD
+        normalized = re.sub(r'\b(XAU)\s+(USD)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(XAG)\s+(USD)\b', r'\1\2', normalized)
+        # Major currencies: EUR USD, GBP USD, USD JPY, etc.
+        normalized = re.sub(r'\b(EUR)\s+(USD)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(GBP)\s+(USD)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(USD)\s+(JPY)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(AUD)\s+(USD)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(NZD)\s+(USD)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(USD)\s+(CAD)\b', r'\1\2', normalized)
+        normalized = re.sub(r'\b(USD)\s+(CHF)\b', r'\1\2', normalized)
+        
         # Standardize common variations
         replacements = {
             'STOP LOSS': 'SL',
@@ -160,14 +223,94 @@ class SignalParser:
         return normalized
     
     def _extract_action(self, text: str) -> Optional[str]:
-        """Extract trading action from normalized text"""
-        # Check for BUY
+        """
+        Extract trading action from normalized text.
+        
+        Supports:
+        - BUY, SELL (standard)
+        - LONG → BUY, SHORT → SELL (normalized)
+        """
+        # Check for BUY or LONG
         if re.search(r'\bBUY\b', text):
             return 'BUY'
+        if re.search(r'\bLONG\b', text):
+            return 'BUY'  # LONG → BUY normalization
         
-        # Check for SELL
+        # Check for SELL or SHORT
         if re.search(r'\bSELL\b', text):
             return 'SELL'
+        if re.search(r'\bSHORT\b', text):
+            return 'SELL'  # SHORT → SELL normalization
+        
+        return None
+    
+    def _extract_order_type(self, text: str) -> str:
+        """
+        Detect LIMIT vs MARKET order type from signal text.
+        
+        Returns:
+            'LIMIT' or 'MARKET'
+        """
+        # Check for explicit MARKET keywords first
+        market_keywords = ['MARKET', 'NOW', 'IMMEDIATE', 'ASAP']
+        if any(keyword in text for keyword in market_keywords):
+            return 'MARKET'
+        
+        # Check for LIMIT indicators
+        if 'LIMIT' in text:
+            return 'LIMIT'
+        
+        # Check for entry price pattern with @ or "at"
+        # Pattern: "@ 2655" or "AT 1.0900"
+        if re.search(r'[@]\s*\d+\.?\d*', text):
+            return 'LIMIT'
+        
+        # Check for "at" followed by price (but not "at loss" or "at profit")
+        if re.search(r'\bAT\s+\d+\.?\d*', text):
+            return 'LIMIT'
+        
+        # Check for price after action+symbol pattern: "BUY EURUSD 1.0900" or "SELL XAUUSD 2655"
+        # This pattern indicates a limit order with specific entry price
+        if re.search(r'(BUY|SELL|LONG|SHORT)\s+[A-Z]+\s+\d+\.?\d+(?:\s|,|$)', text):
+            return 'LIMIT'
+        
+        # DEFAULT: No entry price or keywords → MARKET order
+        return 'MARKET'
+    
+    def _extract_entry_price(self, text: str) -> Optional[float]:
+        """
+        Extract entry price for LIMIT orders.
+        
+        Returns:
+            float entry price or None if not found
+        
+        CRITICAL: Returns float (not int) for MT5 compatibility
+        """
+        # Pattern 1: "@ 2655.50" or "@2655"
+        match = re.search(r'[@]\s*(\d+\.?\d*)', text)
+        if match:
+            return float(match.group(1))
+        
+        # Pattern 2: "at 1.0900" (but not "at loss" or "at profit")
+        match = re.search(r'\bAT\s+(\d+\.?\d+)', text)
+        if match:
+            return float(match.group(1))
+        
+        # Pattern 3: "LIMIT 2655" or "limit 1.0900"
+        match = re.search(r'LIMIT\s+(\d+\.?\d+)', text)
+        if match:
+            return float(match.group(1))
+        
+        # Pattern 4: Price after action+symbol: "BUY EURUSD 1.0900" or "SELL XAUUSD 2655"
+        # This finds price directly after the symbol
+        match = re.search(r'(BUY|SELL|LONG|SHORT)\s+[A-Z]+\s+(\d+\.?\d+)(?:\s|,|$)', text)
+        if match:
+            return float(match.group(2))
+        
+        # Pattern 5: "entry: 1.0900" or "price: 2655"
+        match = re.search(r'(?:ENTRY|PRICE)[\s:]+(\d+\.?\d+)', text)
+        if match:
+            return float(match.group(1))
         
         return None
     
@@ -202,6 +345,7 @@ class SignalParser:
         - "TP 80000" (space only)
         - "SL - 4,232.37" (comma thousand separator)
         - "TP - 4,205.58" (comma thousand separator)
+        - "TP1 2645 TP2 2640 TP3 2635" (numbered TPs - use TP1 only)
         """
         text_upper = text.upper()
 
@@ -209,8 +353,21 @@ class SignalParser:
         # Pattern captures: digits with optional commas, optional decimal part
         # Examples: "4232.37", "4,232.37", "80000", "80,000"
         if price_type.upper() == 'TP':
+            # NEW: Check for numbered TPs first (TP1, TP2, TP3)
+            # Use TP1 only for simplicity
+            tp1_match = re.search(r'TP\s*1\s*[:\s–-]*\s*([\d,]+(?:\.[\d]+)?)', text_upper)
+            if tp1_match:
+                try:
+                    price_str = tp1_match.group(1).replace(',', '')
+                    return float(price_str)
+                except ValueError:
+                    pass
+            
+            # Fallback: Match TP without number (original pattern)
             # Match: TP, tp, take profit, Take Profit, TAKE PROFIT
-            pattern = r'(?:TP|TAKE\s*PROFIT)\s*[:\s–-]*\s*([\d,]+(?:\.[\d]+)?)'
+            # Use negative lookahead (?!\d) to exclude TP1, TP2, TP3 (number directly after TP)
+            # But allow "TP 4519" (space between TP and price)
+            pattern = r'(?:TP|TAKE\s*PROFIT)(?!\d)\s*[:\s–-]*\s*([\d,]+(?:\.[\d]+)?)'
         elif price_type.upper() == 'SL':
             # Match: SL, sl, stop loss, Stop Loss, STOP LOSS
             pattern = r'(?:SL|STOP\s*LOSS)\s*[:\s–-]*\s*([\d,]+(?:\.[\d]+)?)'
@@ -247,8 +404,8 @@ class SignalParser:
         # This converts STOPLOSS→SL, TAKEPROFIT→TP, etc.
         text_normalized = self._normalize_text(message_text)
         
-        # Check for action keywords (BUY, SELL)
-        has_action = any(word in text_normalized for word in ['BUY', 'SELL'])
+        # Check for action keywords (BUY, SELL, LONG, SHORT)
+        has_action = any(word in text_normalized for word in ['BUY', 'SELL', 'LONG', 'SHORT'])
         
         # Check for symbol-like pattern (2-10 uppercase letters, optional _xN suffix)
         has_symbol = bool(re.search(r'[A-Z]{2,10}(?:_x\d+)?', text_normalized))
@@ -309,13 +466,36 @@ Sell XAUUSD .. Gold now
 Stop loss :4052.555
 Take Profit:4030.353"""),
         
-        # === NEW: Two-message signal support ===
+        # === NEW: LIMIT ORDER SUPPORT (Copy Bot Puneet) ===
+        
+        # Scenario 1: SHORT + MARKET (LONG/SHORT normalization)
+        ("LIMIT #1 - SHORT MARKET", "Short market xau usd Sl - 4462 Tp1 -4401 Tp2 -4243"),
+        
+        # Scenario 2: LONG + MARKET
+        ("LIMIT #2 - LONG MARKET", "XAGUSD LONG market Sl 75.4 Tp - 78.921"),
+        
+        # Scenario 3: BUY LIMIT with entry price
+        ("LIMIT #3 - BUY LIMIT", "XAUUSD Buy Limit 4477 , Sl 4473 , Tp 4519"),
+        
+        # Scenario 4: SELL LIMIT
+        ("LIMIT #4 - SELL LIMIT", "SELL EURUSD @ 1.0950 SL 1.0970 TP 1.0920"),
+        
+        # Multi-TP parsing (use TP1 only)
+        ("MULTI-TP #1", "SELL XAUUSD @ 2655 SL 2665 TP1 2645 TP2 2640 TP3 2635"),
+        
+        # Spaced symbol normalization
+        ("SPACED #1", "Buy xau usd @ 2650 SL 2640 TP 2660"),
+        ("SPACED #2", "Short eur usd market SL 1.10 TP 1.05"),
+        
+        # === Two-message signal support ===
         
         # ENTRY_ONLY signals (action + symbol, no SL/TP)
         ("ENTRY_ONLY #1", "SELL GOLD NOW"),
         ("ENTRY_ONLY #2", "BUY BTC NOW"),
         ("ENTRY_ONLY #3", "BUY XAUUSD NOW"),
         ("ENTRY_ONLY #4", "SELL SILVER"),
+        ("ENTRY_ONLY #5", "LONG GOLD MARKET"),  # LONG + MARKET
+        ("ENTRY_ONLY #6", "SHORT EURUSD NOW"),  # SHORT
         
         # PARAMS_ONLY signals (SL/TP, no action/symbol)
         ("PARAMS_ONLY #1", "TP 2700 SL 2650"),
@@ -409,7 +589,8 @@ Take profit: 4,200.500"""),
         result = parser.parse(msg)
         
         if result:
-            print(f"[OK] Parsed: {result.action} {result.symbol} | SL: {result.stop_loss} | TP: {result.take_profit}")
+            order_info = f" | Order: {result.order_type}" + (f" @ {result.entry_price}" if result.entry_price else "")
+            print(f"[OK] Parsed: {result.action} {result.symbol}{order_info} | SL: {result.stop_loss} | TP: {result.take_profit}")
             if "NON-SIGNAL" in name:
                 print("    [WARN] This should NOT have been detected as signal!")
                 failed += 1
