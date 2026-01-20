@@ -28,8 +28,11 @@ Take Profit: 95000
 
 Cobalt do it in 2 messages : 
 
-1. SELL GOLD NOW
+1. BUY BTC  NOW
 
+
+2. SL – 80000
+   TP – 95000
 
 
 

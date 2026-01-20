@@ -208,8 +208,8 @@ class MT5Handler:
                 'price': price,
                 'sl': sl or 0.0,
                 'tp': tp or 0.0,
-                'deviation': config.MAX_SLIPPAGE,
-                'magic': config.MAGIC_NUMBER,
+                'deviation': config._DEFAULT_DEVIATION,
+                'magic': config._MAGIC_NUMBER,
                 'comment': 'telegram_bot',
                 'type_time': mt5.ORDER_TIME_GTC,
                 'type_filling': mt5.ORDER_FILLING_IOC,
@@ -367,8 +367,8 @@ class MT5Handler:
                 'price': float(entry_price),  # CRITICAL: Must be float
                 'sl': float(sl) if sl else 0.0,  # CRITICAL: Must be float
                 'tp': float(tp) if tp else 0.0,  # CRITICAL: Must be float
-                'deviation': config.MAX_SLIPPAGE,
-                'magic': config.MAGIC_NUMBER,
+                'deviation': config._DEFAULT_DEVIATION,
+                'magic': config._MAGIC_NUMBER,
                 'comment': 'telegram_bot_limit',
                 'type_time': mt5.ORDER_TIME_GTC,  # CRITICAL: GTC for persistent orders
                 'type_filling': mt5.ORDER_FILLING_RETURN,
